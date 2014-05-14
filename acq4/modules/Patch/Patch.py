@@ -26,6 +26,7 @@ class Patch(Module):
             'drawFit': bool,
             'average': int,
     }
+    displayParams =  ['traceColor', 'commandColor', 'fitColor', 'analysisColor']
 
     def __init__(self, manager, name, config):
         Module.__init__(self, manager, name, config)
@@ -38,6 +39,10 @@ class Patch(Module):
         for param, val in config.items():
             if param == 'clampDev':
                 continue
+            if param in self.displayParams:
+                self.ui.changeDisplay(param, val)
+                continue
+                
             if not self.valid_params.has_key(param):
                 # should probably use showMessage instead of print
                 print 'Ignoring unknown parameter in config file: "%s".'%param

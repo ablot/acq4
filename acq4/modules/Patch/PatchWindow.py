@@ -57,7 +57,6 @@ class PatchWindow(QtGui.QMainWindow):
             'average': 1,
         }
         
-        
         self.paramLock = Mutex(QtCore.QMutex.Recursive)
 
         self.manager = dm
@@ -390,6 +389,21 @@ class PatchWindow(QtGui.QMainWindow):
         self.ui.startBtn.setText('Start')
         self.ui.startBtn.setEnabled(True)
         self.ui.startBtn.setChecked(False)
+
+    def changeDisplay(self, param, val):
+        if param == 'traceColor':
+            self.patchCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'commandColor':
+            self.commandCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'fitColor':
+            self.patchFitCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'analysisColor':
+            for curve in self.analysisCurves.values():
+                curve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        else:
+            print 'Unknown display param: %s'%param
+            return
+
         
         
 class PatchThread(QtCore.QThread):
