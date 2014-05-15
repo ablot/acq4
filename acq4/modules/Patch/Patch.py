@@ -56,7 +56,7 @@ class Patch(Module):
             average=1
             )),
         ('Monitor', dict(
-            cycleTime=40,
+            cycleTime=40.,
             average=5
             )),
         ])
@@ -84,20 +84,20 @@ class Patch(Module):
                     continue
                 typ = type(self.defaults[param])
                 if not isinstance(val, typ):
-                    print "Value for parameter '%s' should have type %s; ignoring." % (param, typ) 
+                    print "Value for parameter '%s' should have type %s; ignoring." % (param, typ)
+                    print 'was in %s, had %s'%(modeName, val)
                     continue
-        # Read display configuration from config file
-        display = config.get('display', self.defaultDisplay)
-        for param, val in mode.items():
-            if param not in self.defaults:
-                print 'Ignoring unknown parameter in config file: "%s".' % param
-                continue
         
-        self.ui = PatchWindow(manager, config['clampDev'], modes, display)
+        self.ui = PatchWindow(manager, config['clampDev'], modes)
         # try:
         #     self.ui = PatchWindow(manager, config['clampDev'], modes, display)
         # except KeyError:
         #     raise Exception("Configuration Error! Patch module needs a clampDev field")
+        # Read display configuration from config file
+        display = config.get('display', self.defaultDisplay)
+        for param, val in display.items():
+            self.ui.changeDisplay(param, val)
+             
         self.ui.sigWindowClosed.connect(self.quit)
         mp = os.path.dirname(__file__)
         self.ui.setWindowIcon(QtGui.QIcon(os.path.join(mp, 'icon.png')))

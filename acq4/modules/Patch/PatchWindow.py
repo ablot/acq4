@@ -22,7 +22,7 @@ class PatchWindow(QtGui.QMainWindow):
     
     sigWindowClosed = QtCore.Signal(object)
     
-    def __init__(self, dm, clampName, modes, display):
+    def __init__(self, dm, clampName, modes):
         QtGui.QMainWindow.__init__(self)
         self.setWindowTitle(clampName)
         self.startTime = None
@@ -39,10 +39,10 @@ class PatchWindow(QtGui.QMainWindow):
         
         self.params = modes.pop('default')
         self.modes = modes
-        self.display = display
+        self.stylesheet = {}
         
         self.paramLock = Mutex(QtCore.QMutex.Recursive)
-
+        
         self.manager = dm
         self.clampName = clampName
         self.thread = PatchThread(self)
@@ -122,10 +122,10 @@ class PatchWindow(QtGui.QMainWindow):
         self.stateGroup.setState(self.params)
         
         self.ui.patchPlot.setLabel('left', text='Primary', units='A')
-        self.patchCurve = self.ui.patchPlot.plot(pen=QtGui.QPen(QtGui.QColor(*self.display['patchCurveColor'])))
-        self.patchFitCurve = self.ui.patchPlot.plot(pen=QtGui.QPen(QtGui.QColor(*self.display['fitCurveColor'])))
+        self.patchCurve = self.ui.patchPlot.plot(pen=QtGui.QPen(QtGui.QColor(200,200,200)))
+        self.patchFitCurve = self.ui.patchPlot.plot(pen=QtGui.QPen(QtGui.QColor(0,100,200)))
         self.ui.commandPlot.setLabel('left', text='Command', units='V')
-        self.commandCurve = self.ui.commandPlot.plot(pen=QtGui.QPen(QtGui.QColor(*self.display['commandCurveColor'])))
+        self.commandCurve = self.ui.commandPlot.plot(pen=QtGui.QPen(QtGui.QColor(200,200,200)))
         
         self.ui.startBtn.clicked.connect(self.startClicked)
         self.ui.recordBtn.clicked.connect(self.recordClicked)
@@ -142,7 +142,7 @@ class PatchWindow(QtGui.QMainWindow):
             w = getattr(self.ui, n+'Check')
             w.clicked.connect(self.showPlots)
             p = self.plots[n]
-            self.analysisCurves[n] = p.plot(pen=QtGui.QPen(QtGui.QColor(*self.display['analysisCurveColor'])))
+            self.analysisCurves[n] = p.plot(pen=QtGui.QPen(QtGui.QColor(200,200,200)))
             for suf in ['', 'Std']:
                 self.analysisData[n+suf] = []
         self.showPlots()
@@ -380,6 +380,14 @@ class PatchWindow(QtGui.QMainWindow):
         elif param == 'analysisCurveColor':
             for curve in self.analysisCurves.values():
                 curve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'textColor':
+            self.stylesheet['color'] = val
+            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
+            self.cw.setStyleSheet(stl)
+        elif param == 'backgroundColor':
+            self.stylesheet['background-color'] = val
+            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
+            self.cw.setStyleSheet(stl)
         else:
             print 'Unknown display param: %s'%param
             return
