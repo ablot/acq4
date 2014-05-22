@@ -5,7 +5,7 @@ I22
 sS'fileOrder'
 p2
 (lp3
-S'C:\\Documents and Settings\\Experimenters\\luke\\acq4\\lib\\drivers\\MultiClamp\\AxMultiClampMsg.h'
+S'acq4\\drivers\\MultiClamp\\AxMultiClampMsg.h'
 p4
 asS'fileDefs'
 p5
