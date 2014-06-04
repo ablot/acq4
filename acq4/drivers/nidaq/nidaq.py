@@ -85,6 +85,30 @@ class _NIDAQ:
         #else:
             #raise NameError(attr)
 
+    def setMultiDevConf(self, config):
+        """Used to transfer relevant part of the config from nidaq device to
+        nidaq drive
+        
+        An example config would be:
+        multiDev:
+            clockSampleSource: 'Dev1/RTSI1'
+            clockInputs: 
+                Dev3: 'RTSI1'
+            triggerSource: ('Dev1/ao', 'PFI0')
+            triggerInputs: 
+                Dev3/ao: 'PFI0'
+                Dev1/ai: 'PFI12'
+                Dev3/ai: 'PFI1'
+        """
+        devs = self.listDevices()
+        if len(devs) == 1:
+            print "Only one dev, nothing to configure, parameters will not be used"
+            return
+        if not config.has_key('clockSampleSource'):
+            print "No 'clockSampleSource', Devs will not be synchronised"
+            return
+        self._multiDevs = config
+
     def call(self, func, *args):
         func = 'DAQmx' + func
         ret = None

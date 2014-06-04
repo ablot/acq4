@@ -9,7 +9,6 @@ from collections import OrderedDict
 
 class SuperTask:
     """Class for creating and encapsulating multiple synchronous tasks. Holds and assembles arrays for writing to each task as well as per-channel meta data."""
-    
     def __init__(self, daq):
         self.daq = daq
         self.tasks = {}
@@ -19,6 +18,7 @@ class SuperTask:
         self.devs = daq.listDevices()
         self.triggerChannel = None
         self.result = None
+        
         
     def absChanName(self, chan):
         parts = chan.lstrip('/').split('/')
@@ -164,8 +164,85 @@ class SuperTask:
         
         ## Make sure we're only using 1 DAQ device (not sure how to tie 2 together yet)
         ndevs = len(set([k[0] for k in keys]))
-        #if ndevs > 1:
+        if ndevs > 1:
+            w = False
+            if not hasattr(self.daq, '_warned'):
+                w = True
+                self.daq._warned = True
+            if w: print "WARNING: support for multiple DAQ is experiemental!!!"
+            if not hasattr(self.daq, '_multiDevs'):
+                if w: print "No config to synchronise devices. Do nothing and hope for the best"
+            else:
+                if w: print 'should do stuff'
+                cfg = self.daq._multiDevs
+                
+                # first export the sample clock
+                if not cfg['clockSampleSource'].startswith('/'):
+                    cfg['clockSampleSource'] = '/'+cfg['clockSampleSource']
+                _, clkDev, clkChan = cfg['clockSampleSource'].split('/')
+                print _
+                print clkDev
+                print clkChan
+                if (clkDev, 'ao') in keys:
+                    clkSource = 'ao'
+                elif (clkDev, 'ai') in keys:
+                    clkSource = 'ai'
+                else:
+                    raise Exception("Trying to use multidaq setup without the clock source")
+                    
+                # UGLY TEST:
+                tsk = self.tasks[(clkDev, clkSource)]
+                trig, trigSource = cfg['triggerSource']
+                _, trigDev, trigChan = trig.split('/')
+                assert trigDev == clkDev
+                trigID = self.daq.Val_StartTrigger
+                dest = '/%s/%s'%(trigDev, cfg['triggerSource'][1])
+                o = self.daq.call("ExportSignal", tsk.handle, trigID, dest)
+                if w: print 'Exporting start trigger from %s on %s'%((clkDev, clkSource), cfg['triggerSource'])
+                
+#                splClk_ID = self.daq.Val_SampleClock
+#                o = self.daq.call("ExportSignal", tsk.handle, splClk_ID, cfg['clockSampleSource'])
+#                if w: print 'Exporting sample clock from %s on %s'%((clkDev, clkSource), cfg['clockSampleSource'])
+                  
+                # now connect the clock inputs
+                for k in self.tasks:
+                    dev, chan = k
+                    if dev != clkDev:
+                        if dev not in cfg['clockInputs']:
+                            raise Exception('Multi-dev synchronisation error: unconfigured clock for device %s'%dev)
+                        else:
+                            dest = '/'+'/'.join(cfg['clockInputs'].items()[0])
+                            tsk = self.tasks[k]
+                            o = tsk.CfgSampClkTiming(cfg['clockSampleSource'], rate, self.daq.Val_Rising, self.daq.Val_FiniteSamps, nPts)
+                            if w: print 'Connecting sample clock of %s on %s'%(k, dest)
+                                
+                        if k not in cfg['triggerInputs']:
+                            raise Exception('Multi-dev synchronisation error: unconfigured trigger for device %s'%dev)
+                        else:
+                            #dest = '/'+ dev + '/' + cfg['triggerInputs'][k]
+                            tsk = self.tasks[k]
+                            o = tsk.CfgDigEdgeStartTrig(cfg['triggerInputs'][k], self.daq.Val_Rising)
+                            if w: print 'Connecting trigger of %s on %s'%(k, cfg['triggerInputs'][k])
+                    else:
+                        if chan == clkSource:
+                            self.tasks[k].CfgSampClkTiming("", rate, self.daq.Val_Rising, self.daq.Val_FiniteSamps, nPts)
+                            if w: print 'Using own sample clock for %s on %s'%k
+                        else:
+                            clk = '/%s/%s/SampleClock' % (clkDev, clkSource)
+                            print clk
+                            o = self.tasks[k].CfgSampClkTiming(clk, rate, self.daq.Val_Rising, self.daq.Val_FiniteSamps, nPts)
+                            if w: print 'Using %s sample clock for %s'%(clk, k)
+                            o = self.tasks[k].CfgDigEdgeStartTrig(cfg['triggerInputs'][k], self.daq.Val_Rising)
+                            if w: print 'Connecting trigger of %s on %s'%(k, cfg['triggerInputs'][k])
+                            
+                if w: print "clock configuration done"
+                self.clockSource = (clkDev, clkSource)
+                return
+
+            
             #raise Exception("Multiple DAQ devices not yet supported.")
+        
+        # Falling back to single Dev config
         dev = keys[0][0]
         
         if (dev, 'ao') in keys:  ## Try ao first since E-series devices don't seem to work the other way around..
@@ -216,25 +293,34 @@ class SuperTask:
         self.triggerChannel = trig
 
     def start(self):
+        print "let's go!"
         self.writeTaskData()  ## Only writes if needed.
         
         self.result = None
         ## TODO: Reserve all hardware needed before starting tasks
         
         keys = self.tasks.keys()
+#        if hasattr(self.daq, '_multiDevs'):
+#            k = self.clockSource
+#            print "starting task", k
+#            self.startTime = time.clock()
+#            self.startTime = ptime.time()
+#            self.tasks[k].start()
+#            print "has started"
+#            return
         ## move clock task key to the end
         if self.clockSource in keys:
-            #print "  Starting %s last" % str(tt) 
+            print "  Starting %s last" % str(self.clockSource) 
             keys.remove(self.clockSource)
             keys.append(self.clockSource)
         for k in keys[:-1]:
-            #print "starting task", k
+            print "starting task", k
             self.tasks[k].start()
-        #self.startTime = time.clock()
+        self.startTime = time.clock()
         self.startTime = ptime.time()
-        #print "start time:", self.startTime
+        print "start time:", self.startTime
         self.tasks[keys[-1]].start()
-        #print "starting clock task:", keys[-1]
+        print "starting clock task:", keys[-1]
         
 #        for k in keys:
 #          if not self.tasks[k].isRunning():

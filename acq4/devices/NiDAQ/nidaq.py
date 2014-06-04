@@ -27,6 +27,8 @@ class NiDAQ(Device):
         else:
             from acq4.drivers.nidaq.nidaq import NIDAQ
             self.n = NIDAQ
+            if config.has_key('multiDev'):
+                self.n.setMultiDevConf(config['multiDev'])
         print "Created NiDAQ handle, devices are %s" % repr(self.n.listDevices())
         self.delayedSet = Mutex.threadsafe({})
     
@@ -259,11 +261,18 @@ class Task(DeviceTask):
         #startOrder.append(self.dev.name())
         
         ## Determine how the task will be triggered
+        print 'kaboum'
         if 'triggerChan' in self.cmd:
+            print 'kabim'
             self.st.setTrigger(trigger)
+            # THERE IS PROBABLY A PROBLEM HERE trigger not defined #TOCHECK
         elif 'triggerDevice' in self.cmd:
             tDevName = self.cmd['triggerDevice']
             tDev = self.dev.dm.getDevice(tDevName)
+            print 'lalalaaaaaaa'
+            print tDevName
+            print tDev.getTriggerChannel(self.dev.name())
+            print 'lalalaaaaaaa'
             self.st.setTrigger(tDev.getTriggerChannel(self.dev.name()))
             
             ### If there is a trigger device, it needs to start after the DAQ does.
@@ -350,25 +359,28 @@ class Task(DeviceTask):
             elif method == 'Bessel':
                 cutoff = self.cmd['besselCutoff']
                 order = self.cmd['besselOrder']
-                
-                data = NiDAQ.lowpass(data, filter='bessel', cutoff=cutoff, order=order, samplerate=res['info']['rate'])
+                bidir = self.cmd.get('besselBidirectional', True)
+                data = NiDAQ.lowpass(data, filter='bessel', bidir=bidir, cutoff=cutoff, order=order, samplerate=res['info']['rate'])
                 
                 res['info']['filterMethod'] = method
                 res['info']['filterCutoff'] = cutoff
                 res['info']['filterOrder'] = order
+                res['info']['filterBidirectional'] = bidir
             elif method == 'Butterworth':
                 passF = self.cmd['butterworthPassband']
                 stopF = self.cmd['butterworthStopband']
                 passDB = self.cmd['butterworthPassDB']
                 stopDB = self.cmd['butterworthStopDB']
+                bidir = self.cmd.get('butterworthBidirectional', True)
                 
-                data = NiDAQ.lowpass(data, filter='butterworth', cutoff=passF, stopCutoff=stopF, gpass=passDB, gstop=stopDB, samplerate=res['info']['rate'])
+                data = NiDAQ.lowpass(data, filter='butterworth', bidir=bidir, cutoff=passF, stopCutoff=stopF, gpass=passDB, gstop=stopDB, samplerate=res['info']['rate'])
                 
                 res['info']['filterMethod'] = method
                 res['info']['filterPassband'] = passF
                 res['info']['filterStopband'] = stopF
                 res['info']['filterPassbandDB'] = passDB
                 res['info']['filterStopbandDB'] = stopDB
+                res['info']['filterBidirectional'] = bidir
                 
             else:
                 printExc("Unknown filter method '%s'" % str(method))
