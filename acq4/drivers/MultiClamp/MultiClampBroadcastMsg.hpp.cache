@@ -5,7 +5,7 @@ I22
 sS'fileOrder'
 p2
 (lp3
-S'C:\\Documents and Settings\\Experimenters\\luke\\acq4\\lib\\drivers\\MultiClamp\\MultiClampBroadcastMsg.hpp'
+S'acq4\\drivers\\MultiClamp\\MultiClampBroadcastMsg.hpp'
 p4
 asS'fileDefs'
 p5
