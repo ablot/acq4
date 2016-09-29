@@ -153,6 +153,12 @@ class PatchWindow(QtGui.QMainWindow):
         self.updateParams()
         self.show()
         self.bathMode()
+        
+        # Change display parameter according to config file
+        self.stylesheet = dict() # default empty style sheet
+        display = config.get('display', {})
+        for param, val in display.items():
+            self.changeDisplay(param, val)
     
     def quit(self):
         #print "Stopping patch thread.."
@@ -325,6 +331,28 @@ class PatchWindow(QtGui.QMainWindow):
                 arr.write(self.storageFile.name(), appendAxis='Time')
         prof.mark('10')
         prof.finish()
+
+    def changeDisplay(self, param, val):
+        if param == 'traceCurveColor':
+            self.patchCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'commandCurveColor':
+            self.commandCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'fitCurveColor':
+            self.patchFitCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'analysisCurveColor':
+            for curve in self.analysisCurves.values():
+                curve.setPen(QtGui.QPen(QtGui.QColor(*val)))
+        elif param == 'textColor':
+            self.stylesheet['color'] = val
+            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
+            self.cw.setStyleSheet(stl)
+        elif param == 'backgroundColor':
+            self.stylesheet['background-color'] = val
+            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
+            self.cw.setStyleSheet(stl)
+        else:
+            print 'Unknown display param: %s'%param
+            return
         
     def makeAnalysisArray(self, lastOnly=False):
         ## Determine how much of the data to include in this array
