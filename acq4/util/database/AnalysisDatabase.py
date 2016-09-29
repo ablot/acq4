@@ -1,4 +1,5 @@
 from .database import *
+from acq4.util import DataManager
 from acq4.pyqtgraph.widgets.ProgressDialog import ProgressDialog
 import acq4.util.debug as debug
 from acq4.Manager import logExc, logMsg
@@ -450,7 +451,7 @@ class AnalysisDatabase(SqliteDatabase):
 
 
     def createView(self, viewName, tables):
-        """Create a view which joins the tables listed."""
+        """Create a view that joins the tables listed."""
         # db('create view "sites" as select * from photostim_sites inner join DirTable_Protocol on photostim_sites.ProtocolDir=DirTable_Protocol.rowid inner join DirTable_Cell on DirTable_Protocol.CellDir=DirTable_Cell.rowid')
 
         with self.transaction():

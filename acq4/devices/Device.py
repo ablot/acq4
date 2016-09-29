@@ -12,7 +12,6 @@ class Device(QtCore.QObject):
         self._lock_tb_ = None
         self.dm = deviceManager
         self.dm.declareInterface(name, ['device'], self)
-        #self.config = config
         self._name = name
     
     def name(self):
@@ -23,9 +22,6 @@ class Device(QtCore.QObject):
         ### Return a handle unique to this task
         pass
     
-    #def __del__(self):
-        #self.quit()
-        
     def quit(self):
         pass
     
@@ -37,6 +33,36 @@ class Device(QtCore.QObject):
         """Return a widget with a UI to put in the task rack"""
         return TaskGui(self, task)
         
+    def configPath(self):
+        """Return the path used for storing configuration data for this device.
+
+        This path should resolve to `acq4/config/devices/DeviceName_config`.
+        """
+        return os.path.join('devices', self.name() + '_config')
+
+    def configFileName(self, filename):
+        """Return the full path to a config file for this device.
+        """
+        filename = os.path.join(self.configPath(), filename)
+        return self.dm.configFileName(filename)
+
+    def readConfigFile(self, filename):
+        """Read a config file from this device's configuration directory.
+        """
+        fileName = os.path.join(self.configPath(), filename)
+        return self.dm.readConfigFile(fileName)
+
+    def writeConfigFile(self, data, filename):
+        """Write data to a config file in this device's configuration directory.
+        """
+        fileName = os.path.join(self.configPath(), filename)
+        return self.dm.writeConfigFile(data, fileName)
+
+    def appendConfigFile(self, data, filename):
+        """Append data to a config file in this device's configuration directory.
+        """
+        fileName = os.path.join(self.configPath(), filename)
+        return self.dm.appendConfigFile(data, fileName)
 
     def reserve(self, block=True, timeout=20):
         #print "Device %s attempting lock.." % self.name()
@@ -70,8 +96,12 @@ class Device(QtCore.QObject):
         """Return the name of the channel on daq that this device raises when it starts.
         Allows the DAQ to trigger off of this device."""
         return None
+    
+    def __repr__(self):
+        return '<%s "%s">' % (self.__class__.__name__, self.name())
+    
 
-class DeviceTask:
+class DeviceTask(object):
     """
     DeviceTask handles all behavior of a single device during 
     execution of a task, including configuring the device based on the 

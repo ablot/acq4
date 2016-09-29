@@ -3,7 +3,8 @@ from __future__ import with_statement
 from acq4.devices.Device import *
 from acq4.pyqtgraph.SignalProxy import SignalProxy
 import serial, os, time
-from acq4.util.Mutex import Mutex, MutexLocker
+from acq4.util.Mutex import Mutex
+from acq4.util.Thread import Thread
 #import pdb
 
 class SerialMouse(Device):
@@ -45,7 +46,7 @@ class SerialMouse(Device):
         #QtCore.pyqtRemoveInputHook()
         #pdb.set_trace()
         #print "Mouse: posChanged"
-        with MutexLocker(self.lock):
+        with self.lock:
             #print "Mouse: posChanged locked"
             self.pos = [data['abs'][0] * self.scale, data['abs'][1] * self.scale]
             rel = [data['rel'][0] * self.scale, data['rel'][1] * self.scale]
@@ -60,7 +61,7 @@ class SerialMouse(Device):
 
     def btnChanged(self, btns):
         #print "Mouse: btnChanged"
-        with MutexLocker(self.lock):
+        with self.lock:
             change = {}
             for i in [0, 1]:
                 if btns[i] != self.buttons[i]:
@@ -71,20 +72,20 @@ class SerialMouse(Device):
         #print "Mouse: btnChanged done"
         
     def getPosition(self):
-        with MutexLocker(self.lock):
+        with self.lock:
             return self.pos[:]
         
     def getSwitches(self):
-        with MutexLocker(self.lock):
+        with self.lock:
             return self.buttons[:]
 
     def getSwitch(self, swid):
-        with MutexLocker(self.lock):
+        with self.lock:
             return self.buttons[swid]
         
 
     def getState(self):
-        with MutexLocker(self.lock):
+        with self.lock:
             return (self.pos[:], self.buttons[:])
         
     def deviceInterface(self, win):
@@ -108,13 +109,13 @@ class SMInterface(QtGui.QLabel):
         
     
     
-class MouseThread(QtCore.QThread):
+class MouseThread(Thread):
     
     sigButtonChanged = QtCore.Signal(object)
     sigPositionChanged = QtCore.Signal(object)
     
     def __init__(self, dev, startState=None):
-        QtCore.QThread.__init__(self)
+        Thread.__init__(self)
         self.lock = Mutex(QtCore.QMutex.Recursive)
         self.dev = dev
         self.port = self.dev.port
@@ -185,7 +186,7 @@ class MouseThread(QtCore.QThread):
     
     def stop(self, block=False):
         #print "  stop: locking"
-        with MutexLocker(self.lock):
+        with self.lock:
             #print "  stop: requesting stop"
             self.stopThread = True
         if block:

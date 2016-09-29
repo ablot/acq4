@@ -189,27 +189,33 @@ def SignalFilter(signal, LPF, HPF, samplefreq):
     return(w)
 
 # filter with Butterworth low pass, using time-causal lfilter 
-def SignalFilter_LPFButter(signal, LPF, samplefreq, NPole = 8):
+def SignalFilter_LPFButter(signal, LPF, samplefreq, NPole = 8, bidir=False):
     flpf = float(LPF)
     sf = float(samplefreq)
     wn = [flpf/(sf/2.0)]
     b, a = spSignal.butter(NPole, wn, btype='low', output='ba')
     zi = spSignal.lfilter_zi(b,a)
-    out, zo = spSignal.lfilter(b, a, signal, zi=zi*signal[0])
+    if bidir:
+        out, zo = spSignal.filtfilt(b, a, signal, zi=zi*signal[0])
+    else:
+        out, zo = spSignal.lfilter(b, a, signal, zi=zi*signal[0])
     return(numpy.array(out))
 
 # filter with Butterworth high pass, using time-causal lfilter 
-def SignalFilter_HPFButter(signal, HPF, samplefreq, NPole = 8):
+def SignalFilter_HPFButter(signal, HPF, samplefreq, NPole = 8, bidir=False):
     flpf = float(HPF)
     sf = float(samplefreq)
     wn = [flpf/(sf/2.0)]
     b, a = spSignal.butter(NPole, wn, btype='high', output='ba')
     zi = spSignal.lfilter_zi(b,a)
-    out, zo = spSignal.lfilter(b, a, signal, zi=zi*signal[0])
-    return(numpy.array(out)) 
+    if bidir:
+        out, zo = spSignal.filtfilt(b, a, signal, zi=zi*signal[0])
+    else:
+        out, zo = spSignal.lfilter(b, a, signal, zi=zi*signal[0])
+    return(numpy.array(out))
         
 # filter signal with low-pass Bessel
-def SignalFilter_LPFBessel(signal, LPF, samplefreq, NPole = 8, reduce = False):
+def SignalFilter_LPFBessel(signal, LPF, samplefreq, NPole=8, reduce=False, bidir=False):
     """ Low pass filter a signal, possibly reducing the number of points in the
         data array.
         signal: a numpya array of dim = 1, 2 or 3. The "last" dimension is filtered.
@@ -237,7 +243,11 @@ def SignalFilter_LPFBessel(signal, LPF, samplefreq, NPole = 8, reduce = False):
             output = 'ba')
     if signal.ndim == 1:
         sm = numpy.mean(signal)
-        w=spSignal.lfilter(filter_b, filter_a, signal-sm) # filter the incoming signal
+        if bidir:
+            w=spSignal.filtfilt(filter_b, filter_a, signal-sm) # filter the incoming signal
+        else:
+            w=spSignal.lfilter(filter_b, filter_a, signal-sm) # filter the incoming signal
+
         w = w + sm
         if reduction > 1:
             w = spSignal.resample(w, reduction)
@@ -246,7 +256,11 @@ def SignalFilter_LPFBessel(signal, LPF, samplefreq, NPole = 8, reduce = False):
         sh = numpy.shape(signal)
         for i in range(0, numpy.shape(signal)[0]):
             sm = numpy.mean(signal[i,:])
-            w1 = spSignal.lfilter(filter_b, filter_a, signal[i,:]-sm)
+            if bidir:
+                w1 = spSignal.filtfilt(filter_b, filter_a, signal[i, :]-sm)
+            else:
+                w1 = spSignal.lfilter(filter_b, filter_a, signal[i, :]-sm)
+
             w1 = w1 + sm
             if reduction == 1:
                 w1 = spSignal.resample(w1, reduction)
@@ -259,7 +273,10 @@ def SignalFilter_LPFBessel(signal, LPF, samplefreq, NPole = 8, reduce = False):
         for i in range(0, numpy.shape(signal)[0]):
             for j in range(0, numpy.shape(signal)[1]):
                 sm = numpy.mean(signal[i,j,:])
-                w1 = spSignal.lfilter(filter_b, filter_a, signal[i,j,:]-sm)
+                if bidir:
+                    w1 = spSignal.filtfilt(filter_b, filter_a, signal[i,j,:]-sm)
+                else:
+                    w1 = spSignal.lfilter(filter_b, filter_a, signal[i,j,:]-sm)
                 w1 = w1 + sm
                 if reduction == 1:
                     w1 = spSignal.resample(w1, reduction)
@@ -314,7 +331,7 @@ def long_Eval(line):
 
     # long_Eval()
 
-    #
+#
 # routine to flatten an array/list.
 #
 def flatten(l, ltypes=(list, tuple)):
@@ -396,9 +413,9 @@ def clementsBekkers(data, template, threshold=1.0, minpeakdist=15):
 def RichardsonSilberberg(data, tau, time = None):
     D = data.view(numpy.ndarray)
     rn = tau*numpy.diff(D) + D[:-2,:]
-    rn = SavitzyGolay(rn, kernel = 11, order = 4)
+    rn = savitzky_golay(rn, kernel = 11, order = 4)
     if time is not None:
-        vn = rn - tau*SavitzyGolay(numpy.diff(D), kernel = 11, order = 4)
+        vn = rn - tau * savitzky_golay(numpy.diff(D), kernel = 11, order = 4)
         return(rn, vn);
     else:
         return rn
@@ -450,8 +467,12 @@ def findspikes(xin, vin, thresh, t0=None, t1= None, dt=1.0, mode=None, interpola
     #     pylab.show()
 
     dv = numpy.diff(v, axis=0) # compute slope
+    try:
+        dv = numpy.insert(dv, 0, dv[0])
+    except:
+        pass # print 'dv: ', dv
     dv /= dt
-    st=numpy.array([])
+    st = numpy.array([])
     spk = []
     spv = numpy.where(v > thresh)[0].tolist() # find points above threshold
     sps = numpy.where(dv > 0.0)[0].tolist() # find points where slope is positive
@@ -467,7 +488,10 @@ def findspikes(xin, vin, thresh, t0=None, t1= None, dt=1.0, mode=None, interpola
     if mode is 'schmitt':
         sthra = list(numpy.where(numpy.diff(sp) > mingap))
         sthr = [sp[x] for x in sthra[0]] # bump indices by 1
+        #print 'findspikes: sthr: ', len(sthr), sthr
         for k in sthr:
+            if k == 0:
+                continue
             x = xt[k-1:k+1]
             y = v[k-1:k+1]
             if interpolate:
@@ -485,6 +509,7 @@ def findspikes(xin, vin, thresh, t0=None, t1= None, dt=1.0, mode=None, interpola
         z = (numpy.array(numpy.where(numpy.diff(spv) > 1)[0])+1).tolist()
         z.insert(0, 0) # first element in spv is needed to get starting AP
         spk = []
+        #print 'findspikes peak: ', len(z)
         for k in z:
             zk = spv[k]
             spkp = numpy.argmax(v[zk:zk+kpkw])+zk # find the peak position
@@ -641,7 +666,7 @@ def mask(x, xm, x0, x1):
         print "utility.mask(): array to used to derive mask must be 1D"
         return(numpy.array([]))
     xmask = ma.masked_outside(xm, x0, x1)
-    tmask =ma.getmask(xmask)
+    tmask = ma.getmask(xmask)
     if numpy.ndim(x) == 1:
         xnew = ma.array(x, mask=tmask)
         return(xnew.compressed())
@@ -753,7 +778,7 @@ def ffind(path, shellglobs=None, namefs=None, relative=True):
     - relative: a boolean flag that determines whether absolute or
       relative paths should be returned
 
-    Please not that the shell wildcards work in a cumulative fashion
+    Please note that the shell wildcards work in a cumulative fashion
     i.e. each of them is applied to the full set of file *names* found.
 
     Conversely, all the functions in 'namefs'
@@ -763,7 +788,7 @@ def ffind(path, shellglobs=None, namefs=None, relative=True):
         * are applied to the full file *path* (whereas the shell-style
           wildcards are only applied to the file *names*)
 
-    Returns a sequence of paths for files found.
+    Returns a list of paths for files found.
     """
     if not os.access(path, os.R_OK):
         raise ScriptError("cannot access path: '%s'" % path)
@@ -784,7 +809,6 @@ def ffind(path, shellglobs=None, namefs=None, relative=True):
             for ff in namefs: fileList = filter(ff, fileList)
     except Exception, e: raise ScriptError(str(e))
     return(fileList)
-
 
 
 def seqparse(sequence):
@@ -916,7 +940,7 @@ def makeRGB(ncol = 16, minc = 32, maxc = 216):
 # main entry
 #
 
-# If this file is called direclty, then provide tests of some of the routines.
+# If this file is called direcl.y, then provide tests of some of the routines.
 if __name__ == "__main__":
     from optparse import OptionParser
     import matplotlib.pylab as MP

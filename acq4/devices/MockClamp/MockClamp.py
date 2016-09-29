@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import with_statement
 from acq4.devices.DAQGeneric import DAQGeneric, DAQGenericTask, DAQGenericTaskGui
-from acq4.util.Mutex import Mutex, MutexLocker
+from acq4.util.Mutex import Mutex
 #from acq4.devices.Device import *
 from PyQt4 import QtCore, QtGui
 import time
@@ -25,7 +25,6 @@ class MockClamp(DAQGeneric):
     def __init__(self, dm, config, name):
 
         # Generate config to use for DAQ 
-        daqConfig = {}
         self.devLock = Mutex(Mutex.Recursive)
         
         daqConfig = {
@@ -57,7 +56,7 @@ class MockClamp(DAQGeneric):
         if config['simulator'] == 'builtin':
             self.simulator = self.process._import('hhSim')
         elif config['simulator'] == 'neuron':
-            self.simulator = self.process._import('neuronSima')
+            self.simulator = self.process._import('neuronSim')
         
         dm.declareInterface(name, ['clamp'], self)
 
@@ -201,12 +200,10 @@ class MockClampTask(DAQGenericTask):
         ## Called by DAQGeneric to simulate a read-from-DAQ
         res = self.job.result(timeout=30)._getValue()
         return res
-        
 
     def write(self, data, dt):
         ## Called by DAQGeneric to simulate a write-to-DAQ
         self.job = self.dev.simulator.run({'data': data, 'dt': dt, 'mode': self.cmd['mode']}, _callSync='async')
-        
 
     def isDone(self):
         ## check on neuron process

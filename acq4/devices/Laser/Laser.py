@@ -129,7 +129,6 @@ class Laser(DAQGeneric, OptomechDevice):
         DAQGeneric.__init__(self, manager, daqConfig, name)
         OptomechDevice.__init__(self, manager, config, name)
        
-        self._configDir = os.path.join('devices', self.name() + '_config')
         self.lock = Mutex(QtCore.QMutex.Recursive)
         self.variableLock = Mutex(QtCore.QMutex.Recursive)
         self.calibrationIndex = None
@@ -141,12 +140,8 @@ class Laser(DAQGeneric, OptomechDevice):
         self.sigGlobalSubdeviceChanged.connect(self.opticStateChanged) ## called when objectives/filters have been switched
         
         manager.declareInterface(name, ['laser'], self)
+        manager.sigAbortAll.connect(self.closeShutter)
         
-        
-    def configDir(self):
-        """Return the name of the directory where configuration/calibration data should be stored"""
-        return self._configDir
-    
     def setParam(self, **kwargs):
         with self.variableLock:
             for k in kwargs:
@@ -159,42 +154,32 @@ class Laser(DAQGeneric, OptomechDevice):
     def getCalibrationIndex(self):
         with self.lock:
             if self.calibrationIndex is None:
-                calDir = self.configDir()
-                fileName = os.path.join(calDir, 'index')
-                index = self.dm.readConfigFile(fileName)
+                index = self.readConfigFile('index')
                 self.calibrationIndex = index
                 self.pCellCalibration = index.get('pCellCalibration', None)
             return self.calibrationIndex
         
     def getPowerHistory(self):
         with self.variableLock:
-            fileName = os.path.join(self.configDir(), 'powerHistory')
-            if os.path.exists(os.path.join(self.dm.configDir, fileName)):
-                ph = self.dm.readConfigFile(fileName)
+            ph = self.readConfigFile('powerHistory')
+            if ph == {}:
+                date = str(time.strftime('%Y.%m.%d %H:%M:%S'))
+                self.writeConfigFile({'entry_0': {'date':date, 'expectedPower':0}}, 'powerHistory')
+                self.params['expectedPower'] = 0
+                self.powerHistoryCount = 1
+            else:
                 self.powerHistoryCount = len(ph)
                 self.params['expectedPower'] = ph.values()[-1]['expectedPower']
                 return ph
-            else:
-                date = str(time.strftime('%Y.%m.%d %H:%M:%S'))
-                self.dm.writeConfigFile({'entry_0': {'date':date, 'expectedPower':0}}, fileName)
-                self.params['expectedPower'] = 0
-                self.powerHistoryCount = 1
                 
     def appendPowerHistory(self, power):
         with self.variableLock:
-            calDir = self.configDir()
-            fileName = os.path.join(calDir, 'powerHistory')
             date = str(time.strftime('%Y.%m.%d %H:%M:%S'))
-            self.dm.appendConfigFile({'entry_'+str(self.powerHistoryCount):{'date': date, 'expectedPower':power}}, fileName)
-            
-    
+            self.appendConfigFile({'entry_'+str(self.powerHistoryCount):{'date': date, 'expectedPower':power}}, 'powerHistory')
 
     def writeCalibrationIndex(self, index):
         with self.lock:
-            calDir = self.configDir()
-            fileName = os.path.join(calDir, 'index')
-            self.dm.writeConfigFile(index, fileName)
-            #configfile.writeConfigFile(index, fileName)
+            self.writeConfigFile(index, 'index')
             self.calibrationIndex = index
         
     def setAlignmentMode(self, b):
@@ -230,7 +215,6 @@ class Laser(DAQGeneric, OptomechDevice):
             return self.getChanHolding('shutter') > 0
         else:
             raise Exception("No shutter on this laser.")
-        
    
     def openQSwitch(self):
         if self.hasQSwitch:
@@ -772,10 +756,11 @@ class LaserTask(DAQGenericTask):
                 #self.cmd['daqProtocol']['shutter']['command'] = np.zeros(len(calcCmds['shutter']), dtype=np.byte)
                 self.cmd['daqProtocol']['shutter'] = {'preset': 0}
             elif self.cmd['shutterMode'] is 'open':
-                self.cmd['daqProtocol']['shutter'] = {'command': np.ones(len(calcCmds['shutter']), dtype=np.byte)}
+                self.cmd['daqProtocol']['shutter'] = {'preset': 1}
+                # self.cmd['daqProtocol']['shutter'] = {'command': np.ones(len(calcCmds['shutter']), dtype=np.byte)}
                 
-                ## set to holding value, not 0
-                self.cmd['daqProtocol']['shutter']['command'][-1] = 0
+                # ## set to holding value, not 0
+                # self.cmd['daqProtocol']['shutter']['command'][-1] = 0
             
         if 'pCell' in self.cmd:
             self.cmd['daqProtocol']['pCell'] = self.cmd['pCell']

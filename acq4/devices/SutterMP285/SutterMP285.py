@@ -2,18 +2,17 @@
 from __future__ import with_statement
 from acq4.devices.Device import *
 from acq4.devices.OptomechDevice import *
-#import serial, struct
 from acq4.drivers.SutterMP285 import *
 from acq4.drivers.SutterMP285 import SutterMP285 as SutterMP285Driver  ## name collision with device class
 from acq4.util.Mutex import Mutex
+from acq4.util.Thread import Thread
 import acq4.util.debug as debug
 import os, time
-#import pdb
 import devTemplate
-#import functions as fn
 import acq4.pyqtgraph as pg
 import numpy as np
 from copy import deepcopy
+
 
 class SutterMP285(Device, OptomechDevice):
 
@@ -27,11 +26,17 @@ class SutterMP285(Device, OptomechDevice):
         self.configFile = os.path.join('devices', name + '_config.cfg')
         self.lock = Mutex(QtCore.QMutex.Recursive)
         self.port = config['port']  ## windows com ports start at COM1, pyserial ports start at 0
+
+        # whether this device has an arduino interface protecting it from roe/serial collisions
+        # (see acq4/drivers/SutterMP285/mp285_hack)
+        # If not, then position monitoring is disabled.
+        self.useArduino = config.get('useArduino', False)
+
+        self.scale = config.pop('scale', (1, 1, 1))
         # Interpret "COM1" as port 0
         if isinstance(self.port, basestring) and self.port.lower()[:3] == 'com':
             self.port = int(self.port[3:]) - 1
         
-        self.scale = config.get('scale', None) ## Allow config to apply extra scale factor
         self.baud = config.get('baud', 9600)   ## 9600 is probably factory default
         self.pos = [0, 0, 0]
         self.limits = [
@@ -47,7 +52,8 @@ class SutterMP285(Device, OptomechDevice):
         
         self.mThread = SutterMP285Thread(self, self.mp285, self.driverLock, self.scale, self.limits, self.maxSpeed)
         self.mThread.sigPositionChanged.connect(self.posChanged)
-        self.mThread.start()
+        if self.useArduino:
+            self.mThread.start()
         
         dm.declareInterface(name, ['stage'], self)
 
@@ -75,7 +81,7 @@ class SutterMP285(Device, OptomechDevice):
         self.storeConfig()
 
     def getLimit(self):
-            return(self.limits)
+        return(self.limits)
         
     def setMaxSpeed(self, val):
         self.mThread.setMaxSpeed(val)
@@ -232,7 +238,8 @@ class SMP285Interface(QtGui.QWidget):
         self.ui.zPosLabel.setText(text[2])
 
     def updateClicked(self):
-        self.dev.mThread.updatePos()
+        # self.dev.mThread.updatePos()
+        self.dev.getPosition(refresh=True)
         
     def joyStateChanged(self, btn, v):
         ms = self.ui.maxSpeedSpin.value()
@@ -241,13 +248,13 @@ class SMP285Interface(QtGui.QWidget):
 class TimeoutError(Exception):
     pass
         
-class SutterMP285Thread(QtCore.QThread):
+class SutterMP285Thread(Thread):
 
     sigPositionChanged = QtCore.Signal(object)
     sigError = QtCore.Signal(object)
 
     def __init__(self, dev, driver, driverLock, scale, limits, maxSpd):
-        QtCore.QThread.__init__(self)
+        Thread.__init__(self)
         self.lock = Mutex(QtCore.QMutex.Recursive)
         self.scale = scale
         self.mp285 = driver

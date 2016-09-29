@@ -42,13 +42,6 @@ class DaqChannelGui(QtGui.QWidget):
         self.plot = plot
         self.plot.setDownsampling(ds=True, auto=True, mode='peak')
         self.plot.setClipToView(True)
-        #plot.setCanvasBackground(QtGui.QColor(0,0,0))
-        #plot.replot()
-        
-        ## Curves displayed in self.plot
-        #self.plots = []
-        
-        
             
     def postUiInit(self):
         ## Automatically locate all read/writable widgets and group them together for easy 
@@ -57,15 +50,7 @@ class DaqChannelGui(QtGui.QWidget):
         self.stateGroup.addWidget(self.plot, name='plot')
         
         self.displayCheckChanged()
-        #QtCore.QObject.connect(self.ui.displayCheck, QtCore.SIGNAL('stateChanged(int)'), self.displayCheckChanged)
         self.ui.displayCheck.stateChanged.connect(self.displayCheckChanged)
-        #QtCore.QObject.connect(self.ui.groupBox, QtCore.SIGNAL('toggled(bool)'), self.groupBoxClicked)
-        self.ui.groupBox.toggled.connect(self.groupBoxClicked)
-        
-        #if 'userScale' in self.config:
-            #self.setScale(self.config['userScale'])
-        #else:
-            #self.setScale(1.0)
         
         if 'units' in self.config:
             self.setUnits(self.config['units'])
@@ -73,15 +58,7 @@ class DaqChannelGui(QtGui.QWidget):
             self.setUnits('')
             
     def updateTitle(self):
-        if self.ui.groupBox.isChecked():
-            plus = ""
-        else:
-            plus = "[+] "
-        
-        #units = " (x%s)" % siFormat(self.scale, suffix=self.units)
-        
-        
-        self.ui.groupBox.setTitle(plus + self.name + " (%s)" %self.units)
+        self.ui.groupBox.setTitle(self.name + " (%s)" %self.units)
     
     def setUnits(self, units):
         self.units = units
@@ -93,18 +70,6 @@ class DaqChannelGui(QtGui.QWidget):
     def getSpins(self):
         return []
 
-    #def setScale(self, scale):
-        #self.scale = scale
-        #self.updateTitle()
-	        
-    def groupBoxClicked(self, b):
-        self.setChildrenVisible(self.ui.groupBox, b)
-        self.updateTitle()
-        #if b:
-        #    self.ui.groupBox.setTitle(unicode(self.ui.groupBox.title())[4:])
-        #else:
-        #    self.ui.groupBox.setTitle("[+] " + unicode(self.ui.groupBox.title()))
-            
     def setChildrenVisible(self, obj, vis):
         for c in obj.children():
             if isinstance(c, QtGui.QWidget):
@@ -121,9 +86,6 @@ class DaqChannelGui(QtGui.QWidget):
             self.ui.waveGeneratorWidget.update()
 
     def clearPlots(self):
-        #for i in self.plots:
-            #i.detach()
-        #self.plots = []
         self.plot.clear()
         self.currentPlot = None
 
@@ -150,6 +112,7 @@ class OutputChannelGui(DaqChannelGui):
     sigDataChanged = QtCore.Signal(object)
     
     def __init__(self, *args):
+        self._block_update = False  # blocks plotting during state changes
         DaqChannelGui.__init__(self, *args)
         self.units = ''
         self.currentPlot = None
@@ -159,10 +122,8 @@ class OutputChannelGui(DaqChannelGui):
             self.ui = DOChannelTemplate.Ui_Form()
         else:
             raise Exception("Unrecognized channel type '%s'" % self.config['type'])
-        #pdb.set_trace()
         self.ui.setupUi(self)
         self.postUiInit()
-        #self.ui.waveGeneratorWidget.setTimeScale(1e-3)
         
         self.daqChanged(self.daqUI.currentState())
         
@@ -176,9 +137,11 @@ class OutputChannelGui(DaqChannelGui):
         self.ui.waveGeneratorWidget.sigParametersChanged.connect(self.sequenceChanged)
         self.ui.holdingCheck.stateChanged.connect(self.holdingCheckChanged)
         self.ui.holdingSpin.valueChanged.connect(self.holdingSpinChanged)
+        self.ui.functionCheck.toggled.connect(self.functionCheckToggled)
         self.dev.sigHoldingChanged.connect(self.updateHolding)
         
         self.holdingCheckChanged()
+        self.ui.functionCheck.setChecked(True)
 
     def getSpins(self):
         return (self.ui.preSetSpin, self.ui.holdingSpin)
@@ -187,11 +150,6 @@ class OutputChannelGui(DaqChannelGui):
         ## key is 'x' (time), 'y' (amp), or 'xy' (sum)
         self.ui.waveGeneratorWidget.setMeta(key, **kwargs)
         
-    #def setScale(self, scale):
-        #self.ui.waveGeneratorWidget.setScale(scale)
-        #self.scale = scale
-        #self.updateTitle()
-        
     def setUnits(self, units, **kwargs):
         DaqChannelGui.setUnits(self, units)
         self.ui.waveGeneratorWidget.setMeta('y', units=units, siPrefix=True, **kwargs)
@@ -199,7 +157,6 @@ class OutputChannelGui(DaqChannelGui):
     def quit(self):
         DaqChannelGui.quit(self)
         
-        #if not sip.isdeleted(self.daqUI):
         try:
             self.daqUI.sigChanged.disconnect(self.daqChanged)
         except TypeError:
@@ -211,6 +168,13 @@ class OutputChannelGui(DaqChannelGui):
         self.ui.holdingSpin.valueChanged.disconnect(self.holdingSpinChanged)
         self.dev.sigHoldingChanged.disconnect(self.updateHolding)
 
+    def functionCheckToggled(self, checked):
+        if checked:
+            self.ui.waveGeneratorWidget.setEnabled(True)
+            self.updateWaves()
+        else:
+            self.ui.waveGeneratorWidget.setEnabled(False)
+            self.updateWaves()
 
     def daqChanged(self, state):
         self.rate = state['rate']
@@ -222,9 +186,7 @@ class OutputChannelGui(DaqChannelGui):
         return self.ui.waveGeneratorWidget.listSequences()
     
     def sequenceChanged(self):
-        #self.emit(QtCore.SIGNAL('sequenceChanged'), self.dev.name)
         self.sigSequenceChanged.emit(self.dev.name())
-        
     
     def generateTask(self, params=None):
         if params is None:
@@ -236,19 +198,20 @@ class OutputChannelGui(DaqChannelGui):
         if state['holdingCheck']:
             prot['holding'] = state['holdingSpin']
         if state['functionCheck']:
-            #prot['command'] = self.scale * self.getSingleWave(params)  ## scaling is handled by Device
             prot['command'] = self.getSingleWave(params)
-            #if prot['command'] is not None:
-                #print "===command==", prot['command'].min(), prot['command'].max()
-                #print params
             
-        #print prot
         return prot
     
     def handleResult(self, result, params):
         pass
     
     def updateWaves(self):
+        if self._block_update:
+            return
+        if not self.ui.functionCheck.isChecked():
+            self.plot.clear()
+            return
+
         self.clearPlots()
         
         ## display sequence waves
@@ -258,18 +221,23 @@ class OutputChannelGui(DaqChannelGui):
             params[k] = range(len(ps[k]))
         waves = []
         runSequence(lambda p: waves.append(self.getSingleWave(p)), params, params.keys()) ## appends waveforms for the entire parameter space to waves
-        for w in waves:
-            if w is not None:
-                self.ui.functionCheck.setChecked(True)
-                self.plotCurve(w, color=QtGui.QColor(100, 100, 100))
-        
-        ## display single-mode wave in red
-        single = self.getSingleWave()
-        if single is not None:
-            self.ui.functionCheck.setChecked(True)
-            self.plotCurve(single, color=QtGui.QColor(200, 100, 100))
-            #print "===single==", single.min(), single.max()
-        #self.emit(QtCore.SIGNAL('sequenceChanged'), self.dev.name)
+
+        autoRange = self.plot.getViewBox().autoRangeEnabled()
+        self.plot.enableAutoRange(x=False, y=False)
+        try:
+            for w in waves:
+                if w is not None:
+                    # self.ui.functionCheck.setChecked(True)
+                    self.plotCurve(w, color=QtGui.QColor(100, 100, 100))
+            
+            ## display single-mode wave in red
+            single = self.getSingleWave()
+            if single is not None:
+                # self.ui.functionCheck.setChecked(True)
+                self.plotCurve(single, color=QtGui.QColor(200, 100, 100))
+        finally:
+            self.plot.enableAutoRange(x=autoRange[0], y=autoRange[1])
+
         self.sigDataChanged.emit(self)
         
     def taskStarted(self, params):
@@ -277,25 +245,12 @@ class OutputChannelGui(DaqChannelGui):
         if not self.stateGroup.state()['displayCheck']:
             return
         if self.currentPlot is not None:
-            #print "======================== DATCH %s ===========================" % self.currentPlot
-            #import gc
-            #print "REF BEFORE:\n", '\n'.join(["%s:\n%s\n" % (type(x), str(x)) for x in gc.get_referrers(self.currentPlot)[:10]])
             self.plot.removeItem(self.currentPlot)
-            #self.currentPlot.detach()
-        
-            #refs = gc.get_referrers(self.currentPlot)[:10]
-            #print "REF AFTER:\n", '\n'.join(["%s:\n%s\n" % (type(x), str(x)) for x in refs])
-            #refs = gc.get_referrers(refs[1])[:10]
-            #print "REF2 AFTER:\n", '\n'.join(["%s:\n%s\n" % (type(x), str(x)) for x in refs])
-        #a = empty((107)); a = empty((7)); a = empty((10007))
         
         cur = self.getSingleWave(params)
-        #cur = self.ui.waveGeneratorWidget.getSingle(self.rate, self.numPts, params)
         if cur is not None:
             self.currentPlot = self.plotCurve(cur, color=QtGui.QColor(100, 200, 100))
             self.currentPlot.setZValue(100)
-            #print "==cur===", cur.min(), cur.max()
-            #print params
         
     def plotCurve(self, data, color=QtGui.QColor(100, 100, 100), replot=True):
         plot = self.plot.plot(y=data, x=self.timeVals, pen=QtGui.QPen(color))
@@ -341,6 +296,16 @@ class OutputChannelGui(DaqChannelGui):
             self.ui.functionCheck.setChecked(True)
         else:
             self.ui.functionCheck.setChecked(False)
+            
+    def restoreState(self, state):
+        block = self._block_update
+        self._block_update = True
+        try:
+            DaqChannelGui.restoreState(self, state)
+        finally:
+            self._block_update = False
+            
+        self.updateWaves()
         
 class InputChannelGui(DaqChannelGui):
     def __init__(self, *args):

@@ -16,10 +16,15 @@ class NiDAQ(Device):
     """
     Config options:
         defaultAIMode: 'mode'  # mode to use for ai channels by default ('rse', 'nrse', or 'diff')
+        defaultAIRange: [-10, 10]  # default voltage range to use for AI ports
+        defaultAORange: [-10, 10]  # default voltage range to use for AO ports
     """
     def __init__(self, dm, config, name):
         Device.__init__(self, dm, config, name)
         self.config = config
+        self._defaultAIRange = config.get('defaultAIRange', [-10, 10])
+        self._defaultAORange = config.get('defaultAORange', [-10, 10])
+
         ## make local copy of device handle
         if config is not None and config.get('mock', False):
             from acq4.drivers.nidaq.mock import NIDAQ
@@ -57,7 +62,7 @@ class NiDAQ(Device):
         
         try:
             if 'ao' in chan:
-                self.n.writeAnalogSample(chan, value)
+                self.n.writeAnalogSample(chan, value, vRange=self._defaultAORange)
             else:
                 if value is True or value == 1:
                     value = 0xFFFFFFFF
@@ -94,7 +99,7 @@ class NiDAQ(Device):
         #print "Setting channel %s to %f" % (chan, value)
         try:
             if 'ai' in chan:
-                val = self.n.readAnalogSample(chan, mode=mode)
+                val = self.n.readAnalogSample(chan, mode=mode, vRange=self._defaultAIRange)
             else:
                 val = self.n.readDigitalSample(chan)
                 if val <= 0:
@@ -252,26 +257,14 @@ class Task(DeviceTask):
         
         ## Determine the sample clock source, configure tasks
         self.st.configureClocks(rate=self.cmd['rate'], nPts=self.cmd['numPts'])
-
-        
-        ## Probably the DAQ should be started last
-        #startOrder.remove(self.dev.name())
-        #startOrder.append(self.dev.name())
         
         ## Determine how the task will be triggered
         if 'triggerChan' in self.cmd:
-            self.st.setTrigger(trigger)
+            self.st.setTrigger(self.cmd['triggerChan'])
         elif 'triggerDevice' in self.cmd:
             tDevName = self.cmd['triggerDevice']
             tDev = self.dev.dm.getDevice(tDevName)
             self.st.setTrigger(tDev.getTriggerChannel(self.dev.name()))
-            
-            ### If there is a trigger device, it needs to start after the DAQ does.
-            #if tDevName in startOrder:
-                #startOrder.remove(tDevName)
-                #startOrder.append(tDevName)
-            
-        #print "daq configure complete"
         
     def getStartOrder(self):
         before = []
@@ -284,8 +277,15 @@ class Task(DeviceTask):
     def addChannel(self, channel, type, mode=None, **kwargs):
         #print "Adding channel:", args, kwargs
         ## set default channel mode before adding
-        if type == 'ai' and mode is None:
-            mode = self.dev.config.get('defaultAIMode', None)
+        if type == 'ai':
+            if mode is None:
+                mode = self.dev.config.get('defaultAIMode', None)
+            if 'vRange' not in kwargs:
+                kwargs['vRange'] = self.dev._defaultAIRange
+        elif type == 'ao':
+            if 'vRange' not in kwargs:
+                kwargs['vRange'] = self.dev._defaultAORange
+
         return self.st.addChannel(channel, type, mode, **kwargs)
         
     def setWaveform(self, *args, **kwargs):

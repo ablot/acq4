@@ -7,20 +7,20 @@ import time, sys, traceback
 from numpy import *
 from acq4.util.metaarray import *
 import acq4.util.ptime as ptime
-from acq4.util.Mutex import Mutex, MutexLocker
+from acq4.util.Mutex import Mutex
 from acq4.util.debug import *
+
 
 class PVCam(Camera):
     def __init__(self, *args, **kargs):
         self.camLock = Mutex(Mutex.Recursive)  ## Lock to protect access to camera
-        self.ringSize = 100
+        self.ringSize = 50
         Camera.__init__(self, *args, **kargs)  ## superclass will call setupCamera when it is ready.
         self.acqBuffer = None
         self.frameId = 0
         self.lastIndex = None
         self.lastFrameTime = None
         self.stopOk = False
-        
     
     def setupCamera(self):
         self.pvc = PVCDriver
@@ -38,7 +38,6 @@ class PVCam(Camera):
                 raise Exception('Can not find pvcam camera "%s". Options are: %s' % (str(self.camConfig['serial']), str(cams)))
         print "Selected camera:", cams[ind]
         self.cam = self.pvc.getCamera(cams[ind])
-        
     
     def start(self, block=True):
         #print "PVCam: start"
@@ -64,7 +63,7 @@ class PVCam(Camera):
         
     def startCamera(self):
         ## Attempt camera start. If the driver complains that it can not allocate memory, reduce the ring size until it works. (Ridiculous driver bug)
-        printRingSize = False
+        #  Update: as of 2015.03 the bug is still present.
         self.stopOk = False
         while True:
             try:
@@ -73,15 +72,15 @@ class PVCam(Camera):
                     self.acqBuffer = self.cam.start()
                 break
             except Exception, e:
-                if len(e.args) == 2 and e.args[1] == 15:
+                if len(e.args) == 2 and (e.args[1] in (15, 41)):
                     printRingSize = True
                     self.ringSize = int(self.ringSize * 0.9)
+                    print "PVCam error: %r" % e
+                    print "Trying again with smaller ring size %d" % self.ringSize
                     if self.ringSize < 2:
-                        raise Exception("Will not reduce camera ring size < 2")
+                        raise
                 else:
                     raise
-        if printRingSize:
-            print "Reduced camera ring size to %d" % self.ringSize
         
     def stopCamera(self):
         with self.camLock:
@@ -90,7 +89,19 @@ class PVCam(Camera):
                 time.sleep(1.0)
             self.cam.stop()
             self.acqBuffer = None
-        
+
+    def _acquireFrames(self, n=1):
+        assert not self.isRunning(), "Camera must be stopped before calling acquireFrames."
+        return self.cam.acquire(n)
+
+    def noFrameWarning(self, time):
+        # 2015.11: discovered that simply opening connections to multiple USB-serial devices on the same hub as the 
+        # camera can cause it to fail to return frames, even if there is no data being sent to/from the serial devices.
+        # 
+        print "Camera acquisition thread has been waiting %02f sec but no new frames have arrived; shutting down." % diff
+        print "This can be caused by insufficient USB bandwidth; try moving the camera to its own exclusive USB hub."
+        print "Alternatively, reduce the bandwidth requirements of the camera by increasing the binning or decreasing the ROI size."
+
     def newFrames(self):
         """Return a list of all frames acquired since the last call to newFrames."""
         
@@ -157,7 +168,9 @@ class PVCam(Camera):
         
     def quit(self):
         Camera.quit(self)
-        self.pvc.quit()
+        time.sleep(2)
+        self.cam.close()
+        #self.pvc.quit()
         
     def listParams(self, params=None):
         """List properties of specified parameters, or of all parameters if None"""

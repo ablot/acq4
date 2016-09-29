@@ -59,8 +59,14 @@ def gaussian(v, x):
     return v[0] * np.exp(-((x-v[1])**2) / (2 * v[2]**2)) + v[3]
 
 def expDecay(v, x):
-    """Exponential decay function valued at x. Parameter vector is [amplitude, tau, yOffset]"""
+    """Exponential decay function valued at x. Parameter vector is [amplitude, tau]"""
     return v[0] * np.exp(-x / v[1]) #+ v[2]
+
+def expDecayWithOffset(v, x):
+    """Exponential decay function with a y-offset. Suitable for measuring a 
+    bridge-balance offset in a voltage response to a current pulse. Assumes a fixed t0 at x=0.
+    Parameter v is [amp, tau, y-offset]."""
+    return v[0] * (1- np.exp(-x/v[1])) + v[2]
 
 def expPulse(v, x):
     """Exponential pulse function (rising exponential with variable-length plateau followed by falling exponential)
@@ -472,7 +478,7 @@ def recursiveRegisterImages(i1, i2, hint=(0,0), maxDist=None, objSize=None):
     #im2 = i2.mean(axis=2).astype(float)
     
     ## Decide how many iterations to perform, scale images
-    if objSize != None:
+    if objSize is not None:
         nit = int(np.floor(np.log(objSize)/np.log(2)) + 1)
     else:
         nit = 5
@@ -502,12 +508,12 @@ def recursiveRegisterImages(i1, i2, hint=(0,0), maxDist=None, objSize=None):
         im1s = imScale[i][0]
         im2s = imScale[i][1]
         
-        if lastSf != None:
+        if lastSf is not None:
             start = np.floor(np.floor(center-0.5) * sf / lastSf)
             end = np.ceil(np.ceil(center+0.5) * sf / lastSf)
         ## get prediction
         #print "Scale %f: start: %s  end: %s" % (sf, str(start), str(end))
-        if any(start != end):
+        if end is None or any(start != end):
             print "register:", start, end
             center = registerImages(im1s, im2s, (start, end))
         #print "   center = %s" % str(center/sf)
@@ -534,13 +540,13 @@ def registerImages(im1, im2, searchRange):
     start, end = searchRange
     print "start:",start,"end:",end
     
-    if end == None:
-        mode='full'
+    if end is None:
+        mode = 'full'
         im1c = im1
         im2c = im2
         #print "Searching full images."
     else:
-        mode='valid'
+        mode = 'valid'
         s1x = max(0, start[0])
         s1y = max(0, start[1])
         print im1.shape
@@ -583,20 +589,25 @@ def registerImages(im1, im2, searchRange):
     #xc -= xcb
     
     xcm = np.argmin(xc)
+    # argmin returns min index of flattened array
+    xcm = np.unravel_index(xcm, xc.shape)
+
+
     #xcm = xcMax(xc)
     #xcc = concatenate((xc[...,newaxis], xc[...,newaxis], xc[...,newaxis]), axis=2)
     #xcc[xcm[0], xcm[1], 0:2] = xc.min()
     #showImage(xcc)
     #showImage(xcb)
     
-    #print "Best match at " + str(xcm)
+    print "Best match at " + str(xcm)
     if mode == 'full':
         xcm -= np.array(im1c.shape)-1
     else:
         xcm += start
-    #print "  ..corrected to " + str(xcm)
+    print "  ..corrected to " + str(xcm)
     
     #showImage(regPair(im1, im2, xcm))
+    raise Exception()
     return xcm
 
 def regPair(im1, im2, reg):
@@ -1496,7 +1507,7 @@ def threshold(data, threshold, direction=1):
 def measureBaseline(data, threshold=2.0, iterations=2):
     """Find the baseline value of a signal by iteratively measuring the median value, then excluding outliers."""
     data = data.view(ndarray)
-    med = median(data)
+    med = np.median(data)
     if iterations > 1:
         std = data.std()
         thresh = std * threshold
@@ -2319,6 +2330,92 @@ def find(data, val, op='==', arrayOp='all', axis=0, useWeave=True):
             #}
         #"""
         #pass
+
+def measureResistance(data, mode):
+    """Return a tuple of the (inputResistance, seriesResistance) for the given data.
+    Arguments:
+        data      A metaarray with a Time axis and 'primary' and 'command' channels, with a square step in the command channel.
+        mode      Either 'IC' for current clamp or 'VC' for voltage clamp. If mode is 'IC' seriesResistance will be None."""
+    cmd = data['command']
+
+    pulseStart = cmd.axisValues('Time')[np.argwhere(cmd != cmd[0])[0][0]]
+    pulseStop = cmd.axisValues('Time')[np.argwhere(cmd != cmd[0])[-1][0]]
+    
+    ## Extract specific time segments
+    nudge = 0.1e-3
+    base = data['Time': :(pulseStart-nudge)]
+    pulse = data['Time': (pulseStart+nudge):(pulseStop-nudge)]
+    pulseEnd = data['Time': pulseStart+((pulseStop-pulseStart)*2./3.):pulseStop-nudge]
+    end = data['Time': (pulseStop+nudge): ]
+    
+    pulseAmp = pulse['command'].mean() - base['command'].mean()
+
+    if mode == 'IC':
+        inputResistance = (pulseEnd['primary'].mean() - base['primary'].mean())/pulseAmp
+        seriesResistance = None
+
+    elif mode == 'VC':
+        if pulseAmp < 0:
+            RsPeak = data['primary'].min()
+        else:
+            RsPeak = data['primary'].max()
+        seriesResistance = (RsPeak-base['primary'].mean())/pulseAmp
+        inputResistance = (pulseEnd['primary'].mean() - base['primary'].mean())/pulseAmp
+
+    else:
+        raise Exception("Not sure how to interpret mode: %s. Please use either 'VC' or 'IC'. " %str(mode))
+
+    return (inputResistance, seriesResistance)
+
+def measureResistanceWithExponentialFit(data, debug=False):
+    """Return a dict with 'inputResistance', 'bridgeBalance' and 'tau' keys for the given current clamp
+    data. Fits the data to an exponential decay with a y-offset to measure the 
+    voltage drop across the bridge balance. Does not account for any bridge balance 
+    compensation done during recording.
+    Arguments:
+        data      A metaarray with a Time axis and 'primary' and 'command' channels, with a square step in the command channel.
+        debug     Default: False. If True, include extra intermediary calculated values in the dictionary that is returned. 
+
+    """
+
+
+    cmd = data['command']
+
+    pulseStart = cmd.axisValues('Time')[np.argwhere(cmd != cmd[0])[0][0]]
+    pulseStop = cmd.axisValues('Time')[np.argwhere(cmd != cmd[0])[-1][0]]
+
+    baseline = data['Time':0:pulseStart]['primary']
+    baseline = measureBaseline(baseline)
+
+    pulse = data["Time":pulseStart:pulseStop]['primary']
+    xvals = pulse.axisValues('Time') - pulseStart
+
+    fitResult = fit(expDecayWithOffset, xvals, pulse, (-0.01, 0.01, 0.00), generateResult=True)
+
+    amp = fitResult[0][0]
+    tau = fitResult[0][1]
+    yOffset = fitResult[0][2]
+
+    commandAmp = cmd['Time':pulseStart][0] - cmd[0]
+
+    inputResistance = abs((amp)/commandAmp)
+    bridgeBalance = (yOffset - baseline)/commandAmp
+
+    results = {'inputResistance':inputResistance,
+            'bridgeBalance':bridgeBalance,
+            'tau':tau}
+    if debug:
+        results['fitResult'] = fitResult
+        results['xvals'] = xvals
+        results['pulse'] = pulse
+        results['baseline'] = baseline
+        results['commandAmp'] = commandAmp
+
+    return results
+
+
+
+
 
 
 

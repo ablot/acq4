@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
+import os, pickle 
+import numpy as np
+import acq4.pyqtgraph as pg
 from acq4.devices.Device import *
 from acq4.devices.OptomechDevice import OptomechDevice
 from acq4.Manager import logMsg, logExc
-from acq4.util.Mutex import Mutex, MutexLocker
-from DeviceGui import ScannerDeviceGui
-from TaskGui import ScannerTaskGui
-from ScanProgramGenerator import *
-import os, pickle 
-import acq4.util.ptime as ptime
+from acq4.util.Mutex import Mutex
 from acq4.util.debug import *
-import numpy as np
-import acq4.pyqtgraph as pg
+import acq4.util.ptime as ptime
 from acq4.util.HelpfulException import HelpfulException
+from ..Stage import Stage
+from .DeviceGui import ScannerDeviceGui
+from .TaskGui import ScannerTaskGui
+from .scan_program import ScanProgram 
 
 class Scanner(Device, OptomechDevice):
     
@@ -27,7 +28,6 @@ class Scanner(Device, OptomechDevice):
         self.lastRunTime = None
         self.calibrationIndex = None
         self.targetList = [1.0, {}]  ## stores the grids and points used by TaskGui so that they persist
-        self._configDir = os.path.join('devices', self.name() + '_config')
         self.currentCommand = [0,0] ## The last requested voltage values (but not necessarily the current voltage applied to the mirrors)
         self.currentVoltage = [0, 0]
         self.shutterOpen = True ## indicates whether the virtual shutter is closed (the beam is steered to its 'off' position).
@@ -42,20 +42,23 @@ class Scanner(Device, OptomechDevice):
             
     def setCommand(self, vals):
         """Requests to set the command output to the mirrors.
-        (The request is denied if the virtual shutter is closed)"""
+        
+        If the virtual shutter is closed, then the mirrors are not moved until
+        the shutter is opened.
+        """
         with self.lock:
             self.currentCommand = vals
             if self.getShutterOpen():
-                ## make sure we have not requested a command outside the allowed limits
-                (mn, mx) = self.config['commandLimits']
-                v0 = max(mn, min(mx, vals[0]))
-                v1 = max(mn, min(mx, vals[1]))
-                self.setVoltage([v0, v1])
+                self._setVoltage(vals)
             else:
                 logMsg("Virtual shutter closed, not setting mirror position.", msgType='warning')
 
     def setPosition(self, pos, laser):
-        """Set the position of the xy mirrors to a point in the image"""
+        """Set the position of the xy mirrors to a point in the image
+        
+        If the virtual shutter is closed, then the mirrors are not moved until
+        the shutter is opened.
+        """
         prof = Profiler('Scanner.setPosition', disabled=True)
         with self.lock:
             (x, y) = pos
@@ -67,15 +70,23 @@ class Scanner(Device, OptomechDevice):
         prof.finish()
         
     def setShutterOpen(self, o):
-        """Immediately move mirrors 'off' position or back."""
+        """Immediately move mirrors to the 'off' position or back.
+        
+        This method controls a "virtual" shutter that works by moving the scan 
+        mirrors to a location outside the optical train (defined by the 
+        `offVoltage` option in the scanner's configuration). While the virtual
+        shutter is closed, all commands to set the mirror voltage are disabled. 
+        When the virtual shutter is opened, the mirrors move to the most recent 
+        position requested.
+        """
         self.shutterOpen = o
         if o:
-            self.setVoltage(self.getCommand())
+            self._setVoltage(self.getCommand())
         else:
             shVals = self.getShutterVals()
             if shVals is None:
                 raise Exception("Scan mirrors are not configured for virtual shuttering; can not open.")
-            self.setVoltage(shVals)
+            self._setVoltage(shVals)
         self.sigShutterChanged.emit()
         
     def getShutterOpen(self):
@@ -93,48 +104,31 @@ class Scanner(Device, OptomechDevice):
         This is also the current output voltage to the mirrors, unless:
           1) The virtual shutter is closed
           2) The current command is outside the allowed limits
-          3) Someone has called setVoltage when they should have called setCommand"""
+          3) Someone has called _setVoltage when they should have called setCommand"""
         vals = []
         with self.lock:
             vals = self.currentCommand[:]
-            #for x in ['XAxis', 'YAxis']:
-                #(daq, chan) = self.config[x]
-                #dev = self.dm.getDevice(daq)
-                #vals.append(dev.getChannelValue(chan))
         return vals
     
-    def setVoltage(self, vals):
+    def _setVoltage(self, vals):
         '''Immediately sets the voltage value on the mirrors.
-        Does NOT do shutter or limit checking; most likely you want to use setCommand instead.'''
+        Does check virtual shutter state; most likely you want to use setCommand instead.'''
         with self.lock:
+            ## make sure we have not requested a command outside the allowed limits
+            (mn, mx) = self.config['commandLimits']
             for i in [0,1]:
                 x = ['XAxis', 'YAxis'][i]
                 daq = self.config[x]['device']
                 chan = self.config[x]['channel']
                 dev = self.dm.getDevice(daq)
-                dev.setChannelValue(chan, vals[i], block=True)
+                clipped = max(mn, min(mx, vals[i]))
+                dev.setChannelValue(chan, clipped, block=True)
             self.currentVoltage = vals
 
     def getVoltage(self):
         with self.lock:
             return self.currentVoltage
 
-    #def getObjective(self):
-        #"""Return the name of the objective currently in use by the scanner's microscope device"""
-        #return self.getScope().getObjective['name']
-
-    #def getScope(self):
-        ### return the scope device for this scanner
-        #name = self.config['scopeDevice']
-        #return self.dm.getDevice(name)
-        
-    #def getObjective(self, camera):
-        #"""Return the objective currently in use for camera"""
-        #with MutexLocker(self.lock):
-            #camDev = self.dm.getDevice(camera)
-        #scope = camDev.scopeDev
-        #return scope.getObjective()['name']
-    
     def getDaqName(self):
         return self.config['XAxis']['device']
         
@@ -168,67 +162,25 @@ class Scanner(Device, OptomechDevice):
         #print "voltage:", x1, y1
         return [x1, y1]
         
-    #def mapToScanner(self, x, y, camera, laser):
-        #"""Convert global coordinates to voltages required to set scan mirrors"""
-        #obj = self.getObjective(camera)
-        #cam = self.dm.getDevice(camera)
-        #camPos = cam.getPosition()
-        
-        ### first convert position to sensor coords
-        ##print "global:", x, y
-        #(x, y) = cam.mapToSensor((x, y))
-        
-        ##print "camera:", x, y
-        #cal = self.getCalibration(camera, laser, obj)
-        
-        #if cal is None:
-            #raise HelpfulException("The scanner device '%s' is not calibrated for this combination of laser, objective, and camera (%s, %s, %s)" % (self.name, laser, obj, camera))
-            ##raise Exception("No calibration found for this combination of laser, camera, and objective:\n  %s\n  %s\n  %s" % (laser, camera, obj))
-            
-        #cal = cal['params']
-        #x1 = cal[0][0] + cal[0][1] * x + cal[0][2] * y + cal[0][3] * x**2 + cal[0][4] * y**2
-        #y1 = cal[1][0] + cal[1][1] * x + cal[1][2] * y + cal[1][3] * x**2 + cal[1][4] * y**2
-        ##print "voltage:", x1, y1
-        #return [x1, y1]
-    
     def getCalibrationIndex(self):
         with self.lock:
             if self.calibrationIndex is None:
-                calDir = self.configDir()
-                fileName = os.path.join(calDir, 'index')
-                index = self.dm.readConfigFile(fileName)
-                #if os.path.isfile(fileName):
-                    #try:
-                        #index = configfile.readConfigFile(fileName)
-                    #except:
-                        #index = {}
-                        #printExc("===== Warning: Error while reading scanner calibration index:")
-                        #print "    calDir: %s  fileName: %s" % (calDir, fileName)
-                        #print "    self.config:", self.config
-                #else:
-                    #index = {}
+                index = self.readConfigFile('index')
                 self.calibrationIndex = index
             return self.calibrationIndex
         
     def writeCalibrationDefaults(self, state):
         with self.lock:
-            calDir = self.configDir()
-            fileName = os.path.join(calDir, 'defaults')
-            self.dm.writeConfigFile(state, fileName)
+            self.writeConfigFile(state, 'defaults')
         
     def loadCalibrationDefaults(self):
         with self.lock:
-            calDir = self.configDir()
-            fileName = os.path.join(calDir, 'defaults')
-            state = self.dm.readConfigFile(fileName)
+            state = self.readConfigFile('defaults')
             return state
         
     def writeCalibrationIndex(self, index):
         with self.lock:
-            calDir = self.configDir()
-            fileName = os.path.join(calDir, 'index')
-            self.dm.writeConfigFile(index, fileName)
-            #configfile.writeConfigFile(index, fileName)
+            self.writeConfigFile(index, 'index')
             self.calibrationIndex = index
 
     def getCalibration(self, laser, opticState=None):
@@ -252,63 +204,17 @@ class Scanner(Device, OptomechDevice):
         
         return index2.copy()
         
-    #def getCalibration(self, camera, laser, objective=None):
-        #with MutexLocker(self.lock):
-            #index = self.getCalibrationIndex()
-            
-        #if objective is None:
-            #objective = self.getObjective(camera)
-        
-        #if camera in index:
-            #index1 = index[camera]
-        #else:
-            #print "Warning: No calibration found for camera %s" % camera
-            #logMsg("Warning:No calibration found for camera %s" % camera, msgType='warning')
-            #return None
-            
-        #if laser in index1:
-            #index2 = index1[laser]
-        #else:
-            #print "Warning: No calibration found for laser %s" % laser
-            #logMsg("Warning:No calibration found for laser %s" % laser, msgType='warning')
-            #return None
-            
-        #if objective in index2:
-            #index3 = index2[objective]
-        #else:
-            #print "Warning: No calibration found for objective %s" % objective
-            #logMsg("Warning:No calibration found for objective %s" % objective, msgType='warning')
-            #return None
-        
-        ##calFile = os.path.join(calDir, index3['fileName'])
-        
-        ##try:
-            ##cal = MetaArray(file=calFile)
-        ##except:
-            ##print "Error loading calibration file for:\n  %s\n  %s\n  %s" % (laser, camera, obj)
-            ##raise
-        
-        #return index3.copy()
-        
     def storeCameraConfig(self, camera):
         """Store the configuration to be used when calibrating this camera"""
         camDev = self.dm.getDevice(camera)
         params = camDev.listParams()
         params = [p for p in params if params[p][1] and params[p][2]]  ## Select only readable and writable parameters
         state = camDev.getParams(params)
-        fileName = os.path.join(self.configDir(), camera+'Config.cfg')
-        self.dm.writeConfigFile(state, fileName)
+        self.writeConfigFile(state, camera+'Config.cfg')
         
     def getCameraConfig(self, camera):
-        fileName = os.path.join(self.configDir(), camera+'Config.cfg')
-        return self.dm.readConfigFile(fileName)
+        return self.readConfigFile(camera+'Config.cfg')
         
-        
-    def configDir(self):
-        """Return the name of the directory where configuration/calibration data should be stored"""
-        return self._configDir
-        
-    
     def createTask(self, cmd, parentTask):
         with self.lock:
             return ScannerTask(self, cmd, parentTask)
@@ -322,29 +228,23 @@ class Scanner(Device, OptomechDevice):
             if self.devGui is None:
                 self.devGui = ScannerDeviceGui(self, win)
             return self.devGui
-    
-    #def updateTarget(self, name, info):
-        #"""Inform the device that a target or grid of targets has been changed. This allows new instances of TaskGui to share targets with previous ones."""
-        #if info is None:
-            #del self.targetList[1][name]
-        #else:
-            #self.targetList[1][name] = info
-            
-        ##fd = open(self.targetFileName)
-        ##pickle.dump(fd, self.targetList)
-        ##fd.close()
-        
-    #def updateTargetDisplaySize(self, s):
-        
-        #self.targetList[0] = s
-        ##fd = open(self.targetFileName)
-        ##pickle.dump(fd, self.targetList)
-        ##fd.close()
-        
-        
-    #def getTargetList(self):
-        #"""Return the full list of targets generated by previous TaskGuis"""
-        #return self.targetList
+
+    def getFocusDepth(self):
+        return self.mapToGlobal([0, 0, 0])[2]
+
+    def setFocusDepth(self, depth, speed='slow'):
+        dev = self.getFocusDevice()
+        dz = depth - self.getFocusDepth()
+        dpos = dev.globalPosition()
+        return dev.moveToGlobal([dpos[0], dpos[1], dpos[2]+dz], speed)
+
+    def getFocusDevice(self):
+        dev = self.parentDevice()
+        while dev is not None:
+            if isinstance(dev, Stage) and dev.capabilities()['setPos'][2]:
+                return dev
+            dev = dev.parentDevice()
+        raise Exception("Device is not connected to a focus controller.")
 
 
 class ScannerTask(DeviceTask):
@@ -418,10 +318,11 @@ class ScannerTask(DeviceTask):
                 self.cmd['xCommand'], self.cmd['yCommand'] = self.dev.mapToScanner(self.cmd['xPosition'], self.cmd['yPosition'], self.cmd['laser'])
                 prof.mark('position arrays')
             
-            ## Otherwise if program is specified, generate the command arrays now
-            elif 'program' in self.cmd:
-                self.generateProgramArrays(self.cmd)    
-                prof.mark('program')
+            # Deprecated - this should be done by the task creator instead.
+            # The 'program' key is now ignored as meta-data.
+            # elif 'program' in self.cmd:
+            #     self.generateProgramArrays(self.cmd)    
+            #     prof.mark('program')
                 
             ## If shuttering is requested, generate proper arrays and shutter the laser now
             if self.cmd.get('simulateShutter', False):
@@ -458,16 +359,18 @@ class ScannerTask(DeviceTask):
         self.cmd['xCommand'][~mask] = offPos[0]
         self.cmd['yCommand'][~mask] = offPos[1]
         
-    def generateProgramArrays(self, command):
-        generator = ScanProgramGenerator(self.dev, command)
-        arr = generator.generate()
-        self.cmd['xCommand'] = arr[0] ## arrays of voltage values
-        self.cmd['yCommand'] = arr[1]
-
+    # Deprecated - this should be done by the task creator instead.
+    # def generateProgramArrays(self, command):
+    #     arr = ScanProgram.generateVoltageArray(self.dev, command)
+    #     self.cmd['xCommand'] = arr[0] ## arrays of voltage values
+    #     self.cmd['yCommand'] = arr[1]
         
     def createChannels(self, daqTask):
+        ## make sure we have not requested a command outside the allowed limits
+        (mn, mx) = self.dev.config['commandLimits']
+
         self.daqTasks = []
-        with MutexLocker(self.dev.lock):
+        with self.dev.lock:
             ## If buffered waveforms are requested in the command, configure them here.
             for cmdName, channel in [('xCommand', 'XAxis'), ('yCommand', 'YAxis')]:
                 #cmdName = axis[0]
@@ -483,14 +386,15 @@ class ScannerTask(DeviceTask):
                 
                 daqTask.addChannel(chConf['channel'], 'ao')
                 self.daqTasks.append(daqTask)  ## remember task so we can stop it later on
-                daqTask.setWaveform(chConf['channel'], self.cmd[cmdName])
+                clipped = np.clip(self.cmd[cmdName], mn, mx)
+                daqTask.setWaveform(chConf['channel'], clipped)
 
     def stop(self, abort=False):
         if abort:
             with self.abortLock:
                 print "Abort!"
                 self.aborted = True
-        with MutexLocker(self.dev.lock):
+        with self.dev.lock:
             for t in self.daqTasks:
                 t.stop(abort=abort)
             self.dev.lastRunTime = ptime.time()
@@ -498,7 +402,7 @@ class ScannerTask(DeviceTask):
 
     def start(self):
         #print "start"
-        with MutexLocker(self.dev.lock):
+        with self.dev.lock:
             lastRunTime = self.dev.lastRunTime
         if lastRunTime is None:
             #print "  no wait"

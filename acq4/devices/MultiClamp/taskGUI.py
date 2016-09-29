@@ -21,7 +21,7 @@ class MultiClampTaskGui(TaskGui):
         self.traces = {}  ## Stores traces from a sequence to allow average plotting
         self.resetInpPlots = False  ## Signals result handler to clear plots before adding a new one
         self.currentCmdPlot = None
-        
+        self._block_update = False  # blocks plotting during state changes
         
         self.ui = Ui_Form()
         self.ui.setupUi(self)
@@ -52,24 +52,19 @@ class MultiClampTaskGui(TaskGui):
         self.ui.waveGeneratorWidget.sigParametersChanged.connect(self.sequenceChanged)
         self.stateGroup.sigChanged.connect(self.uiStateChanged)
         self.dev.sigStateChanged.connect(self.devStateChanged)
+        self.dev.sigHoldingChanged.connect(self.devHoldingChanged)
+        self.uiStateChanged('', '')
         self.devStateChanged()
-        
         
     def uiStateChanged(self, name, value):
         if 'ModeRadio' in name:
             self.setMode()
         
-        #i0Checks = [self.ui.holdingCheck, self.ui.primaryGainCheck, self.ui.secondaryGainCheck]
         if self.getMode() == 'I=0':
             self.ui.holdingCheck.setChecked(False)
             self.ui.holdingCheck.setEnabled(False)
-            #for c in i0Checks:
-                #c.setChecked(False)
-                #c.setEnabled(False)
         else:
             self.ui.holdingCheck.setEnabled(True)
-            #for c in i0Checks:
-                #c.setEnabled(True)
             
         checkMap = {
             'holdingCheck': self.ui.holdingSpin,
@@ -83,8 +78,6 @@ class MultiClampTaskGui(TaskGui):
         if name in checkMap:
             checkMap[name].setEnabled(value)
             self.devStateChanged()
-            
-        
 
     def devStateChanged(self, state=None):
         mode = self.getMode()
@@ -103,8 +96,13 @@ class MultiClampTaskGui(TaskGui):
         if not self.ui.secondarySignalCombo.isEnabled():
             ssig = state['secondarySignal']
         self.setSignals(psig, ssig)
-        
-            
+
+    def devHoldingChanged(self, dev, mode):
+        if mode != self.getMode():
+            return
+        if not self.ui.holdingSpin.isEnabled():
+            state = self.dev.getLastState(mode)
+            self.ui.holdingSpin.setValue(state['holding'])
 
     def saveState(self):
         state = self.stateGroup.state().copy()
@@ -114,17 +112,19 @@ class MultiClampTaskGui(TaskGui):
         return state
         
     def restoreState(self, state):
+        block = self._block_update
         try:
+            self._block_update = True
             self.setMode(state['mode'])
             if 'primarySignal' in state and 'secondarySignal' in state:
                 self.setSignals(state['primarySignal'], state['secondarySignal'])
             self.stateGroup.setState(state)
+            self.devStateChanged()
         except:
             printExc('Error while restoring MultiClamp task GUI state:')
-            
-        #self.ui.waveGeneratorWidget.update() ## should be called as a result of stateGroup.setState; don't need to call again
-        
-        
+        finally:
+            self._block_update = block
+        self.updateWaves()
         
     def daqChanged(self, state):
         self.rate = state['rate']
@@ -136,31 +136,39 @@ class MultiClampTaskGui(TaskGui):
         return self.ui.waveGeneratorWidget.listSequences()
 
     def sequenceChanged(self):
-        #self.emit(QtCore.SIGNAL('sequenceChanged'), self.dev.name)
         self.sigSequenceChanged.emit(self.dev.name())
 
     def updateWaves(self):
+        if self._block_update:
+            return
+
         self.clearCmdPlots()
         
-        ## display sequence waves
+        ## compute sequence waves
         params = {}
         ps = self.ui.waveGeneratorWidget.listSequences()
         for k in ps:
             params[k] = range(len(ps[k]))
         waves = []
         runSequence(lambda p: waves.append(self.getSingleWave(p)), params, params.keys())
-        for w in waves:
-            if w is not None:
-                #self.plotCmdWave(w / self.cmdScale, color=QtGui.QColor(100, 100, 100), replot=False)
-                self.plotCmdWave(w, color=QtGui.QColor(100, 100, 100), replot=False)
+
+        # Plot all waves but disable auto-range first to improve performance.
+        autoRange = self.ui.bottomPlotWidget.getViewBox().autoRangeEnabled()
+        self.ui.bottomPlotWidget.enableAutoRange(x=False, y=False)
+        try:
+            for w in waves:
+                if w is not None:
+                    self.plotCmdWave(w, color=QtGui.QColor(100, 100, 100), replot=False)
         
-        ## display single-mode wave in red
-        single = self.getSingleWave()
-        if single is not None:
-            #self.plotCmdWave(single / self.cmdScale, color=QtGui.QColor(200, 100, 100))
-            p = self.plotCmdWave(single, color=QtGui.QColor(200, 100, 100))
-            p.setZValue(1000)
-        #self.paramListChanged
+            ## display single-mode wave in red
+            single = self.getSingleWave()
+            if single is not None:
+                p = self.plotCmdWave(single, color=QtGui.QColor(200, 100, 100))
+                p.setZValue(1000)
+
+        finally:
+            # re-enable auto range if needed
+            self.ui.bottomPlotWidget.enableAutoRange(x=autoRange[0], y=autoRange[1])
         
     def clearCmdPlots(self):
         self.ui.bottomPlotWidget.clear()
@@ -224,19 +232,12 @@ class MultiClampTaskGui(TaskGui):
     def getSingleWave(self, params=None):
         state = self.stateGroup.state()
         h = state['holdingSpin']
-        #if state['holdingCheck']:
-            #h = state['holdingSpin']
-        #else:
-            #h = 0.0
         self.ui.waveGeneratorWidget.setOffset(h)
-        #self.ui.waveGeneratorWidget.setScale(self.cmdScale)
         ## waveGenerator generates values in V or A
         wave = self.ui.waveGeneratorWidget.getSingle(self.rate, self.numPts, params)
         
         if wave is None:
             return None
-        #if state['holdingCheck']:
-            #wave += (state['holdingSpin'] / self.cmdScale)
         return wave
         
         
@@ -274,42 +275,29 @@ class MultiClampTaskGui(TaskGui):
                     c.addItem(ss)
             self.stateGroup.blockSignals(False)
             
-            #self.ui.primarySignalCombo.clear()
-            #for s in self.modeSignalList['primary'][mode]:
-                #self.ui.primarySignalCombo.addItem(s)
-            #self.ui.secondarySignalCombo.clear()
-            #for s in self.modeSignalList['secondary'][mode]:
-                #self.ui.secondarySignalCombo.addItem(s)
-            
             # Disable signal, holding, and gain checks (only when switching between v and i modes)
             if mode == 'VC' or oldMode == 'VC':
                 self.ui.primarySignalCheck.setChecked(False)
                 self.ui.secondarySignalCheck.setChecked(False)
                 self.ui.holdingCheck.setChecked(False)
-                self.ui.holdingSpin.setValue(0.0)
                 self.ui.primaryGainCheck.setChecked(False)
                 self.ui.secondaryGainCheck.setChecked(False)
+                self.devStateChanged()
             
             # update unit labels and scaling
             if mode == 'VC':
                 newUnit = 'V'
                 oldUnit = 'A'
-                #self.cmdScale = 1e-3
-                #self.inpScale = 1e-12
                 spinOpts = dict(suffix='V', siPrefix=True, dec=True, step=0.5, minStep=1e-3)
                 self.ui.waveGeneratorWidget.setMeta('y', **spinOpts)
                 self.ui.waveGeneratorWidget.setMeta('xy', units='V*s', siPrefix=True, dec=True, step=0.5, minStep=1e-6)
             else:
                 newUnit = 'A'
                 oldUnit = 'V'
-                #self.cmdScale = 1e-12
-                #self.inpScale = 1e-3
                 spinOpts = dict(suffix='A', siPrefix=True, dec=True, step=0.5, minStep=1e-12)
                 self.ui.waveGeneratorWidget.setMeta('y', **spinOpts)
                 self.ui.waveGeneratorWidget.setMeta('xy', units='C', siPrefix=True, dec=True, step=0.5, minStep=1e-15)
-            #self.stateGroup.setScale(self.ui.holdingSpin, 1./self.cmdScale)
             self.ui.holdingSpin.setOpts(**spinOpts)
-            #self.ui.waveGeneratorWidget.setScale(self.cmdScale)
             for l in self.unitLabels:
                 text = str(l.text())
                 l.setText(text.replace(oldUnit, newUnit))

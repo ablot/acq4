@@ -29,6 +29,7 @@ SI_PREFIXES_ASCII = 'yzafpnum kMGTPEZY'
 
 from .Qt import QtGui, QtCore, USE_PYSIDE
 from . import getConfigOption, setConfigOptions
+from .reload import getPreviousVersion
 import numpy as np
 import decimal, re
 import ctypes
@@ -447,11 +448,9 @@ def affineSlice(data, shape, origin, vectors, axes, order=1, returnCoords=False,
     
     ## Build array of sample locations. 
     grid = np.mgrid[tuple([slice(0,x) for x in shape])]  ## mesh grid of indexes
-    #print shape, grid.shape
     x = (grid[np.newaxis,...] * vectors.transpose()[(Ellipsis,) + (np.newaxis,)*len(shape)]).sum(axis=1)  ## magic
     x += origin
-    #print "X values:"
-    #print x
+
     ## iterate manually over unused axes since map_coordinates won't do it for us
     if have_scipy:
         extraShape = data.shape[len(axes):]
@@ -464,7 +463,6 @@ def affineSlice(data, shape, origin, vectors, axes, order=1, returnCoords=False,
         # interpolateArray expects indexes at the last axis. 
         tr = tuple(range(1,x.ndim)) + (0,)
         output = interpolateArray(data, x.transpose(tr))
-        
     
     tr = list(range(output.ndim))
     trb = []
@@ -483,7 +481,7 @@ def affineSlice(data, shape, origin, vectors, axes, order=1, returnCoords=False,
 
 def interpolateArray(data, x, default=0.0):
     """
-    N-dimensional interpolation similar scipy.ndimage.map_coordinates.
+    N-dimensional interpolation similar to scipy.ndimage.map_coordinates.
     
     This function returns linearly-interpolated values sampled from a regular
     grid of data. 
@@ -492,7 +490,7 @@ def interpolateArray(data, x, default=0.0):
     *x* is an array with (shape[-1] <= data.ndim) containing the locations
         within *data* to interpolate. 
     
-    Returns array of shape (x.shape[:-1] + data.shape)
+    Returns array of shape (x.shape[:-1] + data.shape[x.shape[-1]:])
     
     For example, assume we have the following 2D image data::
     
@@ -535,12 +533,12 @@ def interpolateArray(data, x, default=0.0):
 
     This is useful for interpolating from arrays of colors, vertexes, etc.
     """
-    
     prof = debug.Profiler()
     
-    result = np.empty(x.shape[:-1] + data.shape, dtype=data.dtype)
     nd = data.ndim
     md = x.shape[-1]
+    if md > nd:
+        raise TypeError("x.shape[-1] must be less than or equal to data.ndim")
 
     # First we generate arrays of indexes that are needed to 
     # extract the data surrounding each point
@@ -553,21 +551,19 @@ def interpolateArray(data, x, default=0.0):
     for ax in range(md):
         mask = (xmin[...,ax] >= 0) & (x[...,ax] <= data.shape[ax]-1) 
         # keep track of points that need to be set to default
-        totalMask &= mask  
+        totalMask &= mask
         
         # ..and keep track of indexes that are out of bounds 
         # (note that when x[...,ax] == data.shape[ax], then xmax[...,ax] will be out
         #  of bounds, but the interpolation will work anyway)
         mask &= (xmax[...,ax] < data.shape[ax])
         axisIndex = indexes[...,ax][fields[ax]]
-        #axisMask = mask.astype(np.ubyte).reshape((1,)*(fields.ndim-1) + mask.shape)
         axisIndex[axisIndex < 0] = 0
         axisIndex[axisIndex >= data.shape[ax]] = 0
         fieldInds.append(axisIndex)
     prof()
-    
+
     # Get data values surrounding each requested point
-    # fieldData[..., i] contains all 2**nd values needed to interpolate x[i]
     fieldData = data[tuple(fieldInds)]
     prof()
     
@@ -586,10 +582,51 @@ def interpolateArray(data, x, default=0.0):
         result = result.sum(axis=0)
 
     prof()
-    totalMask.shape = totalMask.shape + (1,) * (nd - md)
-    result[~totalMask] = default
+
+    if totalMask.ndim > 0:
+        result[~totalMask] = default
+    else:
+        if totalMask is False:
+            result[:] = default
+
     prof()
     return result
+
+
+def subArray(data, offset, shape, stride):
+    """
+    Unpack a sub-array from *data* using the specified offset, shape, and stride.
+    
+    Note that *stride* is specified in array elements, not bytes.
+    For example, we have a 2x3 array packed in a 1D array as follows::
+    
+        data = [_, _, 00, 01, 02, _, 10, 11, 12, _]
+        
+    Then we can unpack the sub-array with this call::
+    
+        subArray(data, offset=2, shape=(2, 3), stride=(4, 1))
+        
+    ..which returns::
+    
+        [[00, 01, 02],
+         [10, 11, 12]]
+         
+    This function operates only on the first axis of *data*. So changing 
+    the input in the example above to have shape (10, 7) would cause the
+    output to have shape (2, 3, 7).
+    """
+    #data = data.flatten()
+    data = data[offset:]
+    shape = tuple(shape)
+    extraShape = data.shape[1:]
+
+    strides = list(data.strides[::-1])
+    itemsize = strides[-1]
+    for s in stride[1::-1]:
+        strides.append(itemsize * s)
+    strides = tuple(strides[::-1])
+    
+    return np.ndarray(buffer=data, shape=shape+extraShape, strides=strides, dtype=data.dtype)
 
 
 def transformToArray(tr):
@@ -730,12 +767,11 @@ def solveBilinearTransform(points1, points2):
     
     return matrix
     
-def rescaleData(data, scale, offset, dtype=None):
+def rescaleData(data, scale, offset, dtype=None, clip=None):
     """Return data rescaled and optionally cast to a new dtype::
     
         data => (data-offset) * scale
         
-    Uses scipy.weave (if available) to improve performance.
     """
     if dtype is None:
         dtype = data.dtype
@@ -780,9 +816,21 @@ def rescaleData(data, scale, offset, dtype=None):
             setConfigOptions(useWeave=False)
         
         #p = np.poly1d([scale, -offset*scale])
-        #data = p(data).astype(dtype)
-        d2 = data-offset
+        #d2 = p(data)
+        d2 = data - float(offset)
         d2 *= scale
+        
+        # Clip before converting dtype to avoid overflow
+        if dtype.kind in 'ui':
+            lim = np.iinfo(dtype)
+            if clip is None:
+                # don't let rescale cause integer overflow
+                d2 = np.clip(d2, lim.min, lim.max)
+            else:
+                d2 = np.clip(d2, max(clip[0], lim.min), min(clip[1], lim.max))
+        else:
+            if clip is not None:
+                d2 = np.clip(d2, *clip)
         data = d2.astype(dtype)
     return data
     
@@ -887,7 +935,9 @@ def makeARGB(data, lut=None, levels=None, scale=None, useRGBA=False):
                 minVal, maxVal = levels[i]
                 if minVal == maxVal:
                     maxVal += 1e-16
-                newData[...,i] = rescaleData(data[...,i], scale/(maxVal-minVal), minVal, dtype=int)
+                rng = maxVal-minVal
+                rng = 1 if rng == 0 else rng
+                newData[...,i] = rescaleData(data[...,i], scale / rng, minVal, dtype=int)
             data = newData
         else:
             minVal, maxVal = levels
@@ -896,7 +946,9 @@ def makeARGB(data, lut=None, levels=None, scale=None, useRGBA=False):
             if maxVal == minVal:
                 data = rescaleData(data, 1, minVal, dtype=int)
             else:
-                data = rescaleData(data, scale/(maxVal-minVal), minVal, dtype=int)
+                rng = maxVal-minVal
+                rng = 1 if rng == 0 else rng
+                data = rescaleData(data, scale / rng, minVal, dtype=int)
 
     profile()
 
@@ -1179,6 +1231,8 @@ def downsample(data, n, axis=0, xvals='subsample'):
             data = downsample(data, n[i], axis[i])
         return data
     
+    if n <= 1:
+        return data
     nPts = int(data.shape[axis] / n)
     s = list(data.shape)
     s[axis] = nPts
@@ -2205,3 +2259,44 @@ def toposort(deps, nodes=None, seen=None, stack=None, depth=0):
         sorted.extend( toposort(deps, deps[n], seen, stack+[n], depth=depth+1))
         sorted.append(n)
     return sorted
+
+
+def disconnect(signal, slot):
+    """Disconnect a Qt signal from a slot.
+
+    This method augments Qt's Signal.disconnect():
+
+    * Return bool indicating whether disconnection was successful, rather than
+      raising an exception
+    * Attempt to disconnect prior versions of the slot when using pg.reload    
+    """
+    while True:
+        try:
+            signal.disconnect(slot)
+            return True
+        except TypeError, RuntimeError:
+            slot = getPreviousVersion(slot)
+            if slot is None:
+                return False
+
+
+class SignalBlock(object):
+    """Class used to temporarily block a Qt signal connection::
+
+        with SignalBlock(signal, slot):
+            # do something that emits a signal; it will
+            # not be delivered to slot
+    """
+    def __init__(self, signal, slot):
+        self.signal = signal
+        self.slot = slot
+
+    def __enter__(self):
+        disconnect(self.signal, self.slot)
+        return self
+
+    def __exit__(self, *args):
+        self.signal.connect(self.slot)
+
+
+

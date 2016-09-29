@@ -16,14 +16,16 @@ This class is very heavily featured:
   - Control panel with a huge feature set including averaging, decimation,
     display, power spectrum, svg/png export, plot linking, and more.
 """
-from ...Qt import QtGui, QtCore, QtSvg, USE_PYSIDE
+from ...Qt import QtGui, QtCore, QT_LIB
 from ... import pixmaps
 import sys
 
-if USE_PYSIDE:
-    from .plotConfigTemplate_pyside import *
-else:
+if QT_LIB == 'PyQt4':
     from .plotConfigTemplate_pyqt import *
+elif QT_LIB == 'PySide':
+    from .plotConfigTemplate_pyside import *
+elif QT_LIB == 'PyQt5':
+    from .plotConfigTemplate_pyqt5 import *
 
 from ... import functions as fn
 from ...widgets.FileDialog import FileDialog
@@ -78,6 +80,7 @@ class PlotItem(GraphicsWidget):
     :func:`disableAutoRange <pyqtgraph.ViewBox.disableAutoRange>`,
     :func:`setAspectLocked <pyqtgraph.ViewBox.setAspectLocked>`,
     :func:`invertY <pyqtgraph.ViewBox.invertY>`,
+    :func:`invertX <pyqtgraph.ViewBox.invertX>`,
     :func:`register <pyqtgraph.ViewBox.register>`,
     :func:`unregister <pyqtgraph.ViewBox.unregister>`
     
@@ -144,7 +147,7 @@ class PlotItem(GraphicsWidget):
         self.layout.setVerticalSpacing(0)
         
         if viewBox is None:
-            viewBox = ViewBox()
+            viewBox = ViewBox(parent=self)
         self.vb = viewBox
         self.vb.sigStateChanged.connect(self.viewStateChanged)
         self.setMenuEnabled(enableMenu, enableMenu) ## en/disable plotitem and viewbox menus
@@ -167,14 +170,17 @@ class PlotItem(GraphicsWidget):
             axisItems = {}
         self.axes = {}
         for k, pos in (('top', (1,1)), ('bottom', (3,1)), ('left', (2,0)), ('right', (2,2))):
-            axis = axisItems.get(k, AxisItem(orientation=k))
+            if k in axisItems:
+                axis = axisItems[k]
+            else:
+                axis = AxisItem(orientation=k, parent=self)
             axis.linkToView(self.vb)
             self.axes[k] = {'item': axis, 'pos': pos}
             self.layout.addItem(axis, *pos)
             axis.setZValue(-1000)
             axis.setFlag(axis.ItemNegativeZStacksBehindParent)
         
-        self.titleLabel = LabelItem('', size='11pt')
+        self.titleLabel = LabelItem('', size='11pt', parent=self)
         self.layout.addItem(self.titleLabel, 0, 1)
         self.setTitle(None)  ## hide
         
@@ -299,7 +305,7 @@ class PlotItem(GraphicsWidget):
     for m in ['setXRange', 'setYRange', 'setXLink', 'setYLink', 'setAutoPan',         # NOTE: 
               'setAutoVisible', 'setRange', 'autoRange', 'viewRect', 'viewRange',     # If you update this list, please 
               'setMouseEnabled', 'setLimits', 'enableAutoRange', 'disableAutoRange',  # update the class docstring 
-              'setAspectLocked', 'invertY', 'register', 'unregister']:                # as well.
+              'setAspectLocked', 'invertY', 'invertX', 'register', 'unregister']:                # as well.
                 
         def _create_method(name):
             def method(self, *args, **kwargs):
@@ -468,7 +474,8 @@ class PlotItem(GraphicsWidget):
         
         ### Average data together
         (x, y) = curve.getData()
-        if plot.yData is not None:
+        if plot.yData is not None and y.shape == plot.yData.shape:
+            # note that if shapes do not match, then the average resets.
             newData = plot.yData * (n-1) / float(n) + y * 1.0 / float(n)
             plot.setData(plot.xData, newData)
         else:
@@ -594,6 +601,9 @@ class PlotItem(GraphicsWidget):
             #item.connect(item, QtCore.SIGNAL('plotChanged'), self.plotChanged)
             #item.sigPlotChanged.connect(self.plotChanged)
 
+        if self.legend is not None:
+            self.legend.removeItem(item)
+
     def clear(self):
         """
         Remove all items from the ViewBox.
@@ -638,9 +648,13 @@ class PlotItem(GraphicsWidget):
         Create a new LegendItem and anchor it over the internal ViewBox.
         Plots will be automatically displayed in the legend if they
         are created with the 'name' argument.
+
+        If a LegendItem has already been created using this method, that
+        item will be returned rather than creating a new one.
         """
-        self.legend = LegendItem(size, offset)
-        self.legend.setParentItem(self.vb)
+        if self.legend is None:
+            self.legend = LegendItem(size, offset)
+            self.legend.setParentItem(self.vb)
         return self.legend
         
     def scatterPlot(self, *args, **kargs):
@@ -785,42 +799,9 @@ class PlotItem(GraphicsWidget):
         fileName = str(fileName)
         PlotItem.lastFileDir = os.path.dirname(fileName)
         
-        self.svg = QtSvg.QSvgGenerator()
-        self.svg.setFileName(fileName)
-        res = 120.
-        view = self.scene().views()[0]
-        bounds = view.viewport().rect()
-        bounds = QtCore.QRectF(0, 0, bounds.width(), bounds.height())
-        
-        self.svg.setResolution(res)
-        self.svg.setViewBox(bounds)
-        
-        self.svg.setSize(QtCore.QSize(bounds.width(), bounds.height()))
-        
-        painter = QtGui.QPainter(self.svg)
-        view.render(painter, bounds)
-        
-        painter.end()
-        
-        ## Workaround to set pen widths correctly
-        import re
-        data = open(fileName).readlines()
-        for i in range(len(data)):
-            line = data[i]
-            m = re.match(r'(<g .*)stroke-width="1"(.*transform="matrix\(([^\)]+)\)".*)', line)
-            if m is not None:
-                #print "Matched group:", line
-                g = m.groups()
-                matrix = list(map(float, g[2].split(',')))
-                #print "matrix:", matrix
-                scale = max(abs(matrix[0]), abs(matrix[3]))
-                if scale == 0 or scale == 1.0:
-                    continue
-                data[i] = g[0] + ' stroke-width="%0.2g" ' % (1.0/scale) + g[1] + '\n'
-                #print "old line:", line
-                #print "new line:", data[i]
-        open(fileName, 'w').write(''.join(data))
-        
+        from ...exporters import SVGExporter
+        ex = SVGExporter(self)
+        ex.export(fileName)
         
     def writeImage(self, fileName=None):
         if fileName is None:

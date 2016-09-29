@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-from TaskTemplate import Ui_Form
-from acq4.devices.Device import TaskGui
 from PyQt4 import QtCore, QtGui
-from acq4.Manager import getManager, logMsg, logExc
 import random
 import numpy as np
-from acq4.util.debug import Profiler
 import optimize ## for determining random scan patterns
 import os, sys
+
 import acq4.pyqtgraph as pg
+from acq4.devices.Device import TaskGui
+from acq4.Manager import getManager, logMsg, logExc
+from acq4.util.debug import Profiler
 from acq4.util.HelpfulException import HelpfulException
 import acq4.pyqtgraph.parametertree.parameterTypes as pTypes
 from acq4.pyqtgraph.parametertree import Parameter, ParameterTree, ParameterItem, registerParameterType
 
+from TaskTemplate import Ui_Form
+from .scan_program import ScanProgram, ScanProgramPreview
 
 ### Error IDs:
 ###  1: Could not find spot size from calibration. (from ScannerTaskGui.pointSize)
@@ -33,20 +35,7 @@ class PositionCtrlGroup(pTypes.GroupParameter):
     def addNew(self, typ):
         self.sigAddNewRequested.emit(self, typ)
 
-class ProgramCtrlGroup(pTypes.GroupParameter):
-    sigAddNewRequested = QtCore.Signal(object, object)
-    def __init__(self):
-        opts = {
-            'name': 'Program Controls',
-            'type': 'group',
-            'addText': "Add Control..",
-            'addList': ['lineScan', 'multipleLineScan', 'rectangleScan'],
-            'autoIncrementName': True,
-        }
-        pTypes.GroupParameter.__init__(self, **opts)
-    
-    def addNew(self, typ):
-        self.sigAddNewRequested.emit(self, typ)
+
 
 
 class ScannerTaskGui(TaskGui):
@@ -63,9 +52,12 @@ class ScannerTaskGui(TaskGui):
         self.haveCalibration = True   ## whether there is a calibration for the current combination of laser/optics
         self.currentOpticState = None
         self.currentCamMod = None
-        self.programCtrls = []
         self.displaySize = {}  ## maps (laser,opticState) : display size
                                ## since this setting is remembered for each objective.
+        
+        # Make sure DQ appears in this task
+        daqName = dev.getDaqName()
+        taskRunner.getDevice(daqName)
         
         ## Populate module/device lists, auto-select based on device defaults 
         self.defCam = None
@@ -74,6 +66,9 @@ class ScannerTaskGui(TaskGui):
         defLaser = None
         if 'defaultLaser' in self.dev.config:
             defLaser = self.dev.config['defaultLaser']
+            
+        daqDev = dev.getDaqName()
+        self.daqUI = taskRunner.getDevice(daqDev)
 
         self.ui.cameraCombo.setTypes(['cameraModule'])
         self.ui.laserCombo.setTypes(['laser'])
@@ -82,11 +77,12 @@ class ScannerTaskGui(TaskGui):
         self.positionCtrlGroup.sigAddNewRequested.connect(self.addPositionCtrl)
         self.ui.itemTree.setParameters(self.positionCtrlGroup, showTop=False)
         self.positionCtrlGroup.sigChildRemoved.connect(self.positionCtrlRemoved)
+        self.ui.spotSequenceGroup.setCollapsed(True)
+        self.ui.spotDisplayGroup.setCollapsed(True)
         
-        self.programCtrlGroup = ProgramCtrlGroup()
-        self.programCtrlGroup.sigAddNewRequested.connect(self.addProgramCtrl)
-        self.ui.programTree.setParameters(self.programCtrlGroup, showTop=False)
-        self.programCtrlGroup.sigChildRemoved.connect(self.programCtrlRemoved)
+        self.scanProgram = ScanProgram()
+        self.scanProgram.setDevices(scanner=self.dev)
+        self.ui.programTree.setParameters(self.scanProgram.ctrlParameter(), showTop=False)
 
         ## Set up SpinBoxes
         self.ui.minTimeSpin.setOpts(dec=True, step=1, minStep=1e-3, siPrefix=True, suffix='s', bounds=[0, 50])
@@ -100,16 +96,19 @@ class ScannerTaskGui(TaskGui):
             (self.ui.minDistSpin, 'minDist'),
             (self.ui.simulateShutterCheck, 'simulateShutter'),
             (self.ui.sizeSpin, 'spotSize'),
+            (self.ui.enablePosCtrlCheck, 'enablePosCtrl'),
+            (self.ui.enableScanProgCheck, 'enableScanProg'),
         ])
         self.stateGroup.setState({'minTime': 10, 'minDist': 500e-6, 'sizeSpin':100e-6})
         self.tdPlot = self.ui.tdPlotWidget.plotItem
         self.tdPlot.setLabel('bottom', text="Distance", units='m')
         self.tdPlot.setLabel('left', text="Wait time", units='s')
 
+        self.ui.scanProgramSplitter.setSizes([600, 100])
+        self.ui.programTimeline.setDownsampling(True)
         ## Note we use lambda functions for all these clicks to strip out the arg sent with the signal
         
-        self.ui.hideCheck.toggled.connect(self.showInterface)
-        self.ui.hideMarkerBtn.clicked.connect(self.hideSpotMarker)
+        self.ui.showPosCtrlCheck.toggled.connect(self.showPosCtrls)
         self.ui.cameraCombo.currentIndexChanged.connect(self.camModChanged)
         self.ui.laserCombo.currentIndexChanged.connect(self.laserDevChanged)
         self.ui.sizeFromCalibrationRadio.toggled.connect(self.updateSpotSizes)
@@ -118,6 +117,11 @@ class ScannerTaskGui(TaskGui):
         self.ui.minDistSpin.valueChanged.connect(self.sequenceChanged)
         self.ui.recomputeBtn.clicked.connect(self.recomputeClicked)
         self.ui.loadConfigBtn.clicked.connect(self.loadConfiguration)
+        self.ui.previewBtn.toggled.connect(self.previewProgram)
+        self.ui.enablePosCtrlCheck.toggled.connect(self.enablePosCtrlToggled)
+        self.ui.enableScanProgCheck.toggled.connect(self.enableScanProgToggled)
+        self.ui.showLastSpotCheck.toggled.connect(self.showLastSpotToggled)
+        self.ui.programPreviewSlider.valueChanged.connect(self.previewRateChanged)
         
         self.dev.sigGlobalSubdeviceChanged.connect(self.opticStateChanged)
         
@@ -127,29 +131,42 @@ class ScannerTaskGui(TaskGui):
         self.spotMarker.setPen(pg.mkPen(color=(255,255,255), width = 2))
 
         self.spotMarker.hide()
-        self.updateSpotSizes()
-
+        self.laserDevChanged()  # also updates spot sizes
         self.camModChanged()
         self.updateTDPlot()
-        
             
         #self.ui.simulateShutterCheck.setChecked(False)
         if 'offVoltage' not in self.dev.config: ## we don't have a voltage for virtual shuttering
             self.ui.simulateShutterCheck.setChecked(False)
             self.ui.simulateShutterCheck.setEnabled(False)
+
+        self.daqChanged(self.daqUI.currentState())
+        self.daqUI.sigChanged.connect(self.daqChanged)
+
             
     def setHaveCalibration(self, have):
         self.haveCalibration = have
         self.updateVisibility()
-        
-    def showInterface(self, b):
+
+    def enablePosCtrlToggled(self, b):
+        self.ui.positionCtrlGroup.setVisible(b)
+        self.updateVisibility()
+
+    def enableScanProgToggled(self, b):
+        self.ui.scanProgramGroup.setVisible(b)
+        self.updateVisibility()
+
+    def showPosCtrls(self, b):
         self.updateVisibility()
         
     def updateVisibility(self):
-        b = self.haveCalibration and not self.ui.hideCheck.isChecked()
+        b = self.haveCalibration and self.ui.showPosCtrlCheck.isChecked() and self.ui.enablePosCtrlCheck.isChecked()
         for k in self.items:
             self.items[k].setVisible(b)
         self.testTarget.setVisible(b)
+
+        b = self.haveCalibration and self.ui.enableScanProgCheck.isChecked()
+        self.scanProgram.setVisible(b)
         
     def camModChanged(self):
         camMod = self.cameraModule()
@@ -166,6 +183,12 @@ class ScannerTaskGui(TaskGui):
         camMod.ui.addItem(self.spotMarker, None, [1,1], 1010)
         
         self.opticStateChanged()
+        
+        self.scanProgram.setCanvas(camMod.ui)
+
+    def daqChanged(self, state):
+        # Something changed in DAQ; check that we have the correct sample rate
+        self.scanProgram.setSampling(state['rate'], state['numPts'], state['downsample'])
         
     def getLaser(self):
         return self.ui.laserCombo.currentText()
@@ -192,6 +215,8 @@ class ScannerTaskGui(TaskGui):
         ## called when laser device combo is changed
         ## need to update spot size
         self.updateSpotSizes()
+        self.scanProgram.setDevices(laser=self.ui.laserCombo.getSelectedObj())
+
         
     def sizeSpinEdited(self):
         self.ui.sizeCustomRadio.setChecked(True)
@@ -216,10 +241,10 @@ class ScannerTaskGui(TaskGui):
     def pointSize(self):
         ## returns (calibrated spot size, requested display size)
         try:
-            camMod = self.cameraModule()
-            if camMod is None:
-                return (1,1)
-            cam = camMod.config['camDev']
+            #camMod = self.cameraModule()
+            #if camMod is None:
+                #return (1,1)
+            #cam = camMod.config['camDev']
             laser = self.getLaser()
             cal = self.dev.getCalibration(laser)
             ss = cal['spot'][1]
@@ -253,27 +278,30 @@ class ScannerTaskGui(TaskGui):
             return None
         return mod
         
+
     def saveState(self, saveItems=False):
         state = self.stateGroup.state()
         if saveItems:
             state['items'] = [param.item.saveState() for param in self.positionCtrlGroup.children()]
+        if self.ui.enableScanProgCheck.isChecked():
+            state['program'] = self.scanProgram.saveState()
         return state
-        
+                
     def restoreState(self, state):
         self.stateGroup.setState(state)
         if 'items' in state:
             for itemState in state['items']:
                 typ = itemState['type']
                 self.addItem(typ, itemState)
+        if 'program' in state:
+            self.scanProgram.restoreState(state['program'])
     
     def storeConfiguration(self):
         state = self.saveState(saveItems=True)
-        fileName = os.path.join(self.dev.configDir(), 'lastConfig')
-        self.dev.dm.writeConfigFile(state, fileName)
+        self.dev.writeConfigFile(state, 'lastConfig')
 
     def loadConfiguration(self):
-        fileName = os.path.join(self.dev.configDir(), 'lastConfig')
-        state = self.dev.dm.readConfigFile(fileName)
+        state = self.dev.readConfigFile('lastConfig')
         self.restoreState(state)
         
     def listSequence(self):
@@ -286,7 +314,7 @@ class ScannerTaskGui(TaskGui):
         
     def generateTask(self, params=None):
         if self.cameraModule() is None:
-            raise Exception('No camera module selected, can not build task.')
+            raise Exception('No camera module selected, cannot build task.')
         
         if params is None or 'targets' not in params:
             target = self.testTarget.listPoints()[0]
@@ -297,7 +325,7 @@ class ScannerTaskGui(TaskGui):
             #print "targets:", len(self.targets), params['targets']
             (target, delay) = self.targets[params['targets']]
             
-        if len(self.programCtrls) == 0: # doing regular position mapping
+        if len(self.scanProgram.components) == 0: # doing regular position mapping
             task = {
                 'position': target, 
                 'minWaitTime': delay,
@@ -307,34 +335,20 @@ class ScannerTaskGui(TaskGui):
                 'duration': self.taskRunner.getParam('duration')
             }
         else: # doing programmed scans
-            daqName = self.dev.getDaqName()
+            cmd = self.scanProgram.generateVoltageArray()
             task = {
-               # 'position': target, 
                 'minWaitTime': delay,
-                #'camera': self.cameraModule().config['camDev'], 
-                'laser': self.ui.laserCombo.currentText(),
-                'simulateShutter': self.ui.simulateShutterCheck.isChecked(),
-                'duration': self.taskRunner.getParam('duration'),
-                'numPts': self.taskRunner.getDevice(daqName).currentState()['numPts'],
-                'program': [],
-                   #('step', 0.0, None),           ## start with step to "off" position 
-                   #('step', 0.2, (1.3e-6, 4e-6)), ## step to the given location after 200ms
-                   #('line', (0.2, 0.205), (1.3e-6, 4e-6))  ## 5ms sweep to the new position 
-                   #('step', 0.205, None),           ## finish step to "off" position at 205ms
-               #]
+                'xCommand': cmd[:, 0],
+                'yCommand': cmd[:, 1],
+                'program': self.scanProgram.saveState(),
             }
-            for ctrl in self.programCtrls:
-                if ctrl.isActive():
-                    task['program'].append(ctrl.generateTask())
+        
         return task
     
-    def hideSpotMarker(self):
-        self.spotMarker.hide()
-        
+    def showLastSpotToggled(self, b):
+        self.spotMarker.setVisible(b)
         
     def handleResult(self, result, params):
-        if not self.spotMarker.isVisible():
-            self.spotMarker.show()
         #print 'ScannerTaskGui.handleResult() result:', result
         if 'position' in result:
             pos = result['position']
@@ -358,29 +372,6 @@ class ScannerTaskGui(TaskGui):
         #self.updateGridLinkCombos()
         self.itemChanged()
         
-    def addProgramCtrl(self, param, itemType):
-        ## called when "Add Control.." combo is changed
-        cls = {'lineScan': ProgramLineScan, 
-               'multipleLineScan': ProgramMultipleLineScan, 
-               'rectangleScan': ProgramRectScan}[itemType]
-        state = {}
-        ctrl = cls(**state)
-        self.programCtrlGroup.addChild(ctrl.parameters())
-        self.programCtrls.append(ctrl)
-        camMod = self.cameraModule()
-        if camMod is None:
-            raise HelpfulException("Cannot add control items until a camera module is available to display them.")
-            return False
-        for item in ctrl.getGraphicsItems():
-            camMod.ui.addItem(item, None, [1, 1], 1000)
-
-    def programCtrlRemoved(self, parent, param):
-        ctrl = param.ctrl
-        for item in ctrl.getGraphicsItems():
-            if item.scene() is not None:
-                item.scene().removeItem(item)
-        self.programCtrls.remove(ctrl)
-        
     def getNextItemName(self, base):
         ## Return the next available item name starting with base
         names = [item.name for item in self.items.values()]
@@ -390,29 +381,6 @@ class ScannerTaskGui(TaskGui):
             if name not in names:
                 return name
             num += 1
-        
-    #def addProgram(self, name=None): 
-        #camMod = self.cameraModule()
-        #if camMod is None:
-            #return False
-        #self.ui.programControlsLayout.setEnabled(True)
-        #item = TargetProgram()
-        #if name is None:
-            #name = 'Program' + str(self.nextId)
-        #self.nextId += 1 
-        #item.name = name
-        #item.objective = self.currentObjective
-        #self.items[name] = item
-        #treeitem = QtGui.QTreeWidgetItem(QtCore.QStringList(name))
-        #treeitem.setCheckState(0, QtCore.Qt.Checked)
-        #self.ui.itemTree.addTopLevelItem(treeitem)
-        #self.updateItemColor(treeitem)
-        #camMod.ui.addItem(item.origin, None, [1,1], 1000)
-        #item.connect(QtCore.SIGNAL('regionChangeFinished'), self.itemMoved)
-        #item.connect(QtCore.SIGNAL('regionChanged'), self.getTargetList)
-        #item.connect(QtCore.SIGNAL('pointsChanged'), self.itemChanged)
-        #self.itemChanged(item)
-        #self.updateDeviceTargetList(item)
         
     def addItem(self, itemType, state=None):
         
@@ -498,7 +466,6 @@ class ScannerTaskGui(TaskGui):
                     i.setTargetPen(j, None)
         return locations
 
-    
     def sequenceChanged(self):
         self.targets = None
         self.sigSequenceChanged.emit(self.dev.name())
@@ -523,8 +490,6 @@ class ScannerTaskGui(TaskGui):
             self.ui.recomputeBtn.setEnabled(True)
 
     def generateTargets(self):
-        #items = self.activeItems()
-        #prof= Profiler('ScanerTaskGui.generateTargets()')
         self.targets = []
         locations = self.getTargetList()
         
@@ -534,23 +499,14 @@ class ScannerTaskGui(TaskGui):
         nTries = np.clip(int(10 - len(locations)/20), 1, 10)
         
         ## About to compute order/timing of targets; display a progress dialog
-        #prof.mark('setup')
-        #progressDlg = QtGui.QProgressDialog("Computing pseudo-optimal target sequence...", 0, 1000)
-        #progressDlg.setWindowModality(QtCore.Qt.WindowModal)
-        #progressDlg.setMinimumDuration(500)
-        #prof.mark('progressDlg')
         deadTime = self.taskRunner.getParam('duration')
 
         state = self.stateGroup.state()
         minTime = state['minTime']
         minDist = state['minDist']
 
-        #try:
         with pg.ProgressDialog("Computing random target sequence...", 0, 1000, busyCursor=True) as dlg:
-            #times=[]
             for i in range(nTries):
-                #prof.mark('attempt: %i' %i)
-                
                 ## Run in a remote process for a little speedup
                 for n, m in optimize.opt2(locations, minTime, minDist, deadTime, greed=1.0):
                     ## we can update the progress dialog here.
@@ -558,33 +514,16 @@ class ScannerTaskGui(TaskGui):
                         solution = n
                     else:
                         prg = int(((i/float(nTries)) + ((n/float(m))/float(nTries))) * 1000)
-                        #print n,m, prg
                         dlg.setValue(prg)
-                        #print i
                         if dlg.wasCanceled():
                             raise Exception("Target sequence computation canceled by user.")
-                #prof.mark('foundSolution')
                 time = sum([l[1] for l in solution])
                 if bestTime is None or time < bestTime:
-                    #print "  new best time:", time
                     bestTime = time
                     bestSolution = solution[:]
-                    #print "new best:", len(bestSolution), minTime
-                #prof.mark('check time')
-        #except:
-            #raise
-        #finally:
-            ## close progress dialog no matter what happens
-            #print "Times: ", times
-            #progressDlg.setValue(1000)
         
         self.targets = bestSolution
-        #print "Solution:"
-        #for t in self.targets:
-            #print "  ", t
         self.ui.timeLabel.setText('Total time: %0.1f sec'% bestTime)
-        #prof.mark('Done.')
-        #prof.finish()
         
     def activeItems(self):
         return [self.items[i] for i in self.items if self.items[i].isActive()]
@@ -592,7 +531,25 @@ class ScannerTaskGui(TaskGui):
     def taskStarted(self, params):
         """Task has started; color the current and previous targets"""
         pass
+
+    def previewProgram(self, b):
+        if b:
+            if self.currentCamMod is None:
+                canvas = None
+            else:
+                canvas = self.currentCamMod.window()
+            self.scanProgram.preview.setRate(self._previewRate())
+            self.scanProgram.preview.start(canvas, self.ui.programTimeline)
+        else:
+            self.scanProgram.preview.stop()
+
+    def _previewRate(self):
+        rs = self.ui.programPreviewSlider
+        return 10 ** (3. * ((float(rs.value()) / rs.maximum()) - 1))
     
+    def previewRateChanged(self):
+        self.scanProgram.preview.setRate(self._previewRate())
+
     def quit(self):
         s = self.testTarget.scene()
         if s is not None:
@@ -600,9 +557,7 @@ class ScannerTaskGui(TaskGui):
                 item.close()
             s.removeItem(self.testTarget)
             s.removeItem(self.spotMarker)
-            for ctrl in self.programCtrls:
-                for item in ctrl.getGraphicsItems():
-                    s.removeItem(item)
+        self.scanProgram.close()
 
 
 class TargetPoint(pg.EllipseROI):
@@ -614,7 +569,7 @@ class TargetPoint(pg.EllipseROI):
         #if 'host' in args:
             #self.host = args.pop('host')
         
-        pg.ROI.__init__(self, (0,0), [ptSize] * 2, movable=args.get('movable', True))
+        pg.EllipseROI.__init__(self, (0,0), [ptSize] * 2, movable=args.get('movable', True))
         self.aspectLocked = True
         self.overPen = None
         self.underPen = self.pen
@@ -622,6 +577,9 @@ class TargetPoint(pg.EllipseROI):
         self.params = pTypes.SimpleParameter(name=self.name, type='bool', value=args.get('active', True), removable=True, renamable=True, children=[
         ])
         self.params.item = self
+
+    def _addHandles(self):
+        pass
 
     def isActive(self):
         return self.params.value()
@@ -657,6 +615,7 @@ class TargetPoint(pg.EllipseROI):
     def close(self):
         if self.scene() is not None:
             self.scene().removeItem(self)
+        self.dev.sigGlobalSubdeviceChanged.disconnect(self.opticStateChanged)
 
 
 class Grid(pg.CrosshairROI):
@@ -678,10 +637,11 @@ class Grid(pg.CrosshairROI):
         self.params.param('Active Regions').addNew = self.addActiveRegion
         self.rgns = []
         self.pointSize = ptSize
-        self._points = []
+        self._points = np.empty((0,2), dtype=float)
         self._scene = None 
         self._scatter = pg.ScatterPlotItem(pxMode=False, brush=None, antialias=True)
         self._scatter.setParentItem(self)
+        self._needScatterUpdate = False
         self.params.param('layout').sigStateChanged.connect(self.invalidatePoints)
         self.params.param('spacing').sigStateChanged.connect(self.invalidatePoints)
         self.params.param('Active Regions').sigChildRemoved.connect(self.rgnRemoved)
@@ -786,6 +746,13 @@ class Grid(pg.CrosshairROI):
     
     def invalidatePoints(self):
         self._points = None
+        self._needScatterUpdate = True
+        # Update points in scatter plot item
+        # NOTE: we would rather have this inside prepareForPaint()
+        if self._needScatterUpdate:
+            pts = self.localPoints()
+            self._scatter.setData(x=pts[:,0], y=pts[:,1], size=self.pointSize)
+            self._needScatterUpdate = False
         self.update()
         
     def stateChangeFinished(self):
@@ -856,7 +823,7 @@ class Grid(pg.CrosshairROI):
         pts = pts * np.array(sep).reshape(1, 2)
         pts += np.array(start).reshape(1, 2)
         return pts
-            
+    
     def getSnapPosition(self, pos):
         ## Given that pos has been requested, return the nearest snap-to position
         ## optionally, snap may be passed in to specify a rectangular snap grid.
@@ -897,9 +864,14 @@ class Grid(pg.CrosshairROI):
             self._scene.sigPrepareForPaint.connect(self.prepareForPaint)
 
     def prepareForPaint(self):
-        # Update points in scatter plot item
-        pts = self.localPoints()
-        self._scatter.setData(x=pts[:,0], y=pts[:,1], size=self.pointSize)
+        # NOTE: disabled for now because this generates artifacts. 
+        # Update is moved to invalidatePoints()
+        pass
+        ## Update points in scatter plot item
+        #if self._needScatterUpdate:
+            #pts = self.localPoints()
+            #self._scatter.setData(x=pts[:,0], y=pts[:,1], size=self.pointSize)
+            #self._needScatterUpdate = False
 
         
 class TargetOcclusion(pg.PolygonROI):
@@ -942,223 +914,7 @@ class TargetOcclusion(pg.PolygonROI):
         if self.scene() is not None:
             self.scene().removeItem(self)
     
-class ProgramLineScan(QtCore.QObject):
-    
-    sigStateChanged = QtCore.Signal(object)
-    
-    def __init__(self):
-        QtCore.QObject.__init__(self)
-        self.name = 'lineScan'
-        ### These need to be initialized before the ROI is initialized because they are included in stateCopy(), which is called by ROI initialization.
-        
-        self.params = pTypes.SimpleParameter(name=self.name, autoIncrementName = True, type='bool', value=True, removable=True, renamable=True, children=[
-            dict(name='length', type='float', value=1e-5, suffix='m', siPrefix=True, bounds=[1e-6, None], step=1e-6),
-            dict(name='startTime', type='float', value=5e-2, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2),
-            dict(name='sweepDuration', type='float', value=4e-3, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2),
-            dict(name='retraceDuration', type='float', value=1e-3, suffix='s', siPrefix=True, bounds=[0., None], step=1e-3),
-            dict(name='nScans', type='int', value=100, bounds=[1, None]),
-            dict(name='endTime', type='float', value=5.5e-1, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2, readonly=True),
-        ])
-        self.params.ctrl = self        
-        self.roi = pg.LineSegmentROI([[0.0, 0.0], [self.params['length'], self.params['length']]])
- #       print dir(self.roi)
-        self.params.sigTreeStateChanged.connect(self.update)
-        self.roi.sigRegionChangeFinished.connect(self.updateFromROI)
-        
-    def getGraphicsItems(self):
-        return [self.roi]
-
-    def isActive(self):
-        return self.params.value()
-
-    def setVisible(self, vis):
-        if vis:
-            self.roi.setOpacity(1.0)  ## have to hide this way since we still want the children to be visible
-            for h in self.roi.handles:
-                h['item'].setOpacity(1.0)
-        else:
-            self.roi.setOpacity(0.0)
-            for h in self.roi.handles:
-                h['item'].setOpacity(0.0)
-        
-    def parameters(self):
-        return self.params
-    
-    def update(self):
-        self.params['endTime'] = self.params['startTime']+self.params['nScans']*(self.params['sweepDuration'] + self.params['retraceDuration'])
-        self.setVisible(self.params.value())
-            
-    def updateFromROI(self):
-        p =self.roi.listPoints()
-        dist = (pg.Point(p[0])-pg.Point(p[1])).length()
-        self.params['length'] = dist
-        
-    def generateTask(self):
-        points = self.roi.listPoints() # in local coordinates local to roi.
-        points = [self.roi.mapToView(p) for p in points] # convert to view points (as needed for scanner)
-        return {'type': 'lineScan', 'active': self.isActive(), 'points': points, 'startTime': self.params['startTime'], 'sweepDuration': self.params['sweepDuration'], 
-                'endTime': self.params['endTime'], 'retraceDuration': self.params['retraceDuration'], 'nScans': self.params['nScans']}
-
-
-class MultiLineScanROI(pg.PolyLineROI):
-    """ custom class over ROI polyline to allow alternate coloring of different segments
-    """
-    def addSegment(self, *args, **kwds):
-        pg.PolyLineROI.addSegment(self, *args, **kwds)
-        self.recolor()
-    
-    def removeSegment(self, *args, **kwds):
-        pg.PolyLineROI.removeSegment(self, *args, **kwds)
-        self.recolor()
-    
-    def recolor(self):
-        for i, s in enumerate(self.segments):
-            if i % 2 == 0:
-                s.setPen(self.pen)
-            else:
-                s.setPen(pg.mkPen([75, 200, 75]))
-
-
-class ProgramMultipleLineScan(QtCore.QObject):
-    
-    sigStateChanged = QtCore.Signal(object)
-    
-    def __init__(self):
-        QtCore.QObject.__init__(self)
-        self.name = 'multipleLineScan'
-        ### These need to be initialized before the ROI is initialized because they are included in stateCopy(), which is called by ROI initialization.
-        
-        self.params = pTypes.SimpleParameter(name=self.name, type='bool', value=True, removable=True, renamable=True, children=[
-            dict(name='Length', type='float', value=1e-5, suffix='m', siPrefix=True, bounds=[1e-6, None], step=1e-6),
-            dict(name='startTime', type='float', value=5e-2, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2),
-            dict(name='sweepSpeed', type='float', value=1e-6, suffix='m/ms', siPrefix=True, bounds=[1e-8, None], minStep=5e-7, step=0.5, dec=True),
-            dict(name='interSweepSpeed', type='float', value=5e-6, suffix='m/ms', siPrefix=True, bounds=[1e-8, None], minStep=5e-7, step=0.5, dec=True),
-            dict(name='nScans', type='int', value=100, bounds=[1, None]),
-            dict(name='endTime', type='float', value=5.5e-1, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2, readonly=True),
-        ])
-        self.params.ctrl = self        
-        self.roi = MultiLineScanROI([[0.0, 0.0], [self.params['Length'], self.params['Length']]])
-        self.roi.sigRegionChangeFinished.connect(self.updateFromROI)
-        self.params.sigTreeStateChanged.connect(self.update)
-        
-    def getGraphicsItems(self):
-        return [self.roi]
-
-    def isActive(self):
-        return self.params.value()
-    
-    def setVisible(self, vis):
-        if vis:
-            self.roi.setOpacity(1.0)  ## have to hide this way since we still want the children to be visible
-            for h in self.roi.handles:
-                h['item'].setOpacity(1.0)
-        else:
-            self.roi.setOpacity(0.0)
-            for h in self.roi.handles:
-                h['item'].setOpacity(0.0)
                 
-    def parameters(self):
-        return self.params
-    
-    def update(self):
-        pts = self.roi.listPoints()
-        scanTime = 0.
-        interScanFlag = False
-        for k in xrange(len(pts)): # loop through the list of points
-            k2 = k + 1
-            if k2 > len(pts)-1:
-                k2 = 0
-            dist = (pts[k]-pts[k2]).length()
-            if interScanFlag is False:
-                scanTime += dist/(self.params['sweepSpeed']*1000.)
-            else:
-                scanTime += dist/(self.params['interSweepSpeed']*1000.)
-            interScanFlag = not interScanFlag
-        self.params['endTime'] = self.params['startTime']+(self.params['nScans']*scanTime)
-        self.setVisible(self.params.value())
-    
-    def updateFromROI(self):
-        self.update()
-    #p =self.roi.listPoints()
-        #dist = (pg.Point(p[0])-pg.Point(p[1])).length()
-        #self.params['length'] = dist
-        
-    def generateTask(self):
-        points=self.roi.listPoints() # in local coordinates local to roi.
-        points = [self.roi.mapToView(p) for p in points] # convert to view points (as needed for scanner)
-        points = [(p.x(), p.y()) for p in points]   ## make sure we can write this data to HDF5 eventually..
-        return {'type': 'multipleLineScan', 'active': self.isActive(), 'points': points, 'startTime': self.params['startTime'], 'sweepSpeed': self.params['sweepSpeed'], 
-                'endTime': self.params['endTime'], 'interSweepSpeed': self.params['interSweepSpeed'], 'nScans': self.params['nScans']}
-                
-    
-class ProgramRectScan(QtCore.QObject):
-    
-    sigStateChanged = QtCore.Signal(object)
-    
-    def __init__(self):
-        QtCore.QObject.__init__(self)
-        self.name = 'rectScan'
-        ### These need to be initialized before the ROI is initialized because they are included in stateCopy(), which is called by ROI initialization.
-        
-        self.params = pTypes.SimpleParameter(name=self.name, type='bool', value=True, removable=True, renamable=True, children=[
-            dict(name='width', type='float', value=2e-5, suffix='m', siPrefix=True, bounds=[1e-6, None], step=1e-6),
-            dict(name='height', type='float', value=1e-5, suffix='m', siPrefix=True, bounds=[1e-6, None], step=1e-6),
-            dict(name='overScan', type='float', value=70., suffix='%', siPrefix=False, bounds=[0, 200.], step = 1),
-            dict(name='pixelSize', type='float', value=4e-7, suffix='m', siPrefix=True, bounds=[2e-7, None], step=2e-7),
-            dict(name='startTime', type='float', value=1e-2, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2),
-            dict(name='duration', type='float', value=5e-1, suffix='s', siPrefix=True, bounds=[0., None], step=1e-2),
-            dict(name='nScans', type='int', value=10, bounds=[1, None]),
-        ])
-        self.params.ctrl = self
-        self.roi = pg.ROI(size=[self.params['width'], self.params['height']], pos=[0.0, 0.0])
-        self.roi.addScaleHandle([1,1], [0.5, 0.5])
-        self.roi.addRotateHandle([0,0], [0.5, 0.5])
-        self.params.sigTreeStateChanged.connect(self.update)
-        self.roi.sigRegionChangeFinished.connect(self.updateFromROI)
-        
-    def getGraphicsItems(self):
-        return [self.roi]
 
-    def isActive(self):
-        return self.params.value()
- 
-    def setVisible(self, vis):
-        if vis:
-            self.roi.setOpacity(1.0)  ## have to hide this way since we still want the children to be visible
-            for h in self.roi.handles:
-                h['item'].setOpacity(1.0)
-        else:
-            self.roi.setOpacity(0.0)
-            for h in self.roi.handles:
-                h['item'].setOpacity(0.0)
-                
-    def parameters(self):
-        return self.params
-
-    def update(self):
-        self.setVisible(self.params.value())
-    
-    def updateFromROI(self):
-        """ read the ROI rectangle width and height and repost
-        in the parameter tree """
-        state = self.roi.getState()
-        w, h = state['size']
-        self.params['width'] = w
-        self.params['height'] = h
-        
-    def generateTask(self):
-        state = self.roi.getState()
-        w, h = state['size']
-        p0 = pg.Point(0,0)
-        p1 = pg.Point(w,0)
-        p2 = pg.Point(0, h)
-        points = [p0, p1, p2]
-        points = [pg.Point(self.roi.mapToView(p)) for p in points] # convert to view points (as needed for scanner)
-        return {'type': self.name, 'active': self.isActive(), 'points': points, 'startTime': self.params['startTime'], 
-                'endTime': self.params['duration']+self.params['startTime'], 'duration': self.params['duration'],
-                'nScans': self.params['nScans'],
-                'pixelSize': self.params['pixelSize'], 'overScan': self.params['overScan'],
-                }
-        
 
 

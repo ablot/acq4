@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-#from ctypes import *
-import time #sys, re, types, ctypes, os, time
+import time
 from numpy import *
-#import cheader
 import acq4.util.ptime as ptime  ## platform-independent precision timing
 from collections import OrderedDict
-#import debug
+from .base import NIDAQError
+
 
 class SuperTask:
     """Class for creating and encapsulating multiple synchronous tasks. Holds and assembles arrays for writing to each task as well as per-channel meta data."""
@@ -64,18 +63,27 @@ class SuperTask:
             elif typ in ['di', 'do']:
                 mode = self.daq.Val_ChanPerLine
         elif isinstance(mode, basestring):
-            modes = {
-                'rse': self.daq.Val_RSE,
-                'nrse': self.daq.Val_NRSE,
-                'diff': self.daq.Val_Diff,
-                'chanperline': self.daq.Val_ChanPerLine,
-                'chanforalllines': self.daq.Val_ChanForAllLines
-            }
+            # decide which modes are allowed for this channel
+            if typ == 'ai':
+                allowed = ['RSE', 'NRSE', 'Diff', 'PseudoDiff']
+            elif typ in ['di', 'do']:
+                allowed = ['ChanPerLine', 'ChanForAllLines']
+            else:
+                raise TypeError("mode argument not accepted for channel type '%s'" % typ)
+
+            # Is the requested mode in the allowed list?
+            lower = list(map(str.lower, allowed))
             try:
-                mode = modes[mode.lower()]
-            except:
-                raise Exception("Unrecognized channel mode '%s'" % mode)
-            
+                ind = lower.index(mode.lower())
+            except ValueError:
+                raise ValueError("Mode '%s' not allowed for channel type '%s'" % (mode, typ))
+
+            # Does the driver support the requested mode?
+            try:
+                mode = getattr(self.daq, 'Val_' + allowed[ind])
+            except AttributeError:
+                raise ValueError("Mode '%s' not supported by the DAQmx driver" % mode)
+
         if typ == 'ai':
             #print 'CreateAIVoltageChan(%s, "", %s, vRange[0], vRange[1], Val_Volts, None)' % (chan, str(mode))
             t.CreateAIVoltageChan(chan, "", mode, vRange[0], vRange[1], self.daq.Val_Volts, None, **kargs)
@@ -142,7 +150,7 @@ class SuperTask:
         for k in self.tasks:
             if self.tasks[k].isOutputTask() and not self.taskInfo[k]['dataWritten']:
                 d = self.getTaskData(k)
-                #print "  Writing %s to task %s" % (d.shape, str(k))
+                # print "  Writing %s %s to task %s" % (d.shape, d.dtype, str(k))
                 try:
                     self.tasks[k].write(d)
                 except:
@@ -192,8 +200,19 @@ class SuperTask:
 
         for k in self.tasks:
             ## TODO: this must be skipped for the task which uses clkSource by default.
+            try:
+                maxrate = self.tasks[k].GetSampClkMaxRate()
+            except NIDAQError as exc:
+                if exc.errCode == -200452:
+                    # Task does not support GetSampClkMaxRate
+                    pass
+            else:
+                if rate > maxrate:
+                    raise ValueError("Requested sample rate %d exceeds maximum (%d) for this device." % (int(rate), int(maxrate)))
+
             if k[1] != clkSource:
                 #print "%s CfgSampClkTiming(%s, %f, Val_Rising, Val_FiniteSamps, %d)" % (str(k), clk, rate, nPts)
+
                 self.tasks[k].CfgSampClkTiming(clk, rate, self.daq.Val_Rising, self.daq.Val_FiniteSamps, nPts)
             else:
                 #print "%s CfgSampClkTiming('', %f, Val_Rising, Val_FiniteSamps, %d)" % (str(k), rate, nPts)

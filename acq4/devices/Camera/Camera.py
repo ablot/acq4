@@ -3,6 +3,7 @@ from __future__ import with_statement
 from acq4.devices.DAQGeneric import DAQGeneric, DAQGenericTask
 from acq4.devices.OptomechDevice import OptomechDevice
 from acq4.util.Mutex import Mutex
+from acq4.util.Thread import Thread
 #from acq4.devices.Device import *
 from acq4.devices.Microscope import Microscope
 from PyQt4 import QtCore
@@ -14,6 +15,7 @@ from deviceGUI import *
 import acq4.util.ptime as ptime
 from acq4.util.Mutex import Mutex
 from acq4.util.debug import *
+from acq4.util import imaging
 from acq4.pyqtgraph import Vector, SRTTransform3D
 
 from CameraInterface import CameraInterface
@@ -74,15 +76,7 @@ class Camera(DAQGeneric, OptomechDevice):
         ## Default values for scope state. These will be used if there is no scope defined.
         self.scopeState = {
             'id': 0,
-            #'scopePosition': [0, 0],   ## position of scope in global coords
-            #'centerPosition': [0, 0],  ## position of objective in global coords (objective may be offset from center of scope)
-            #'offset': [0, 0],
-            #'objScale': 1,
-            #'pixelSize': (1, 1),
-            #'objective': '',
-            #'transform': None,
         }
-        
 
         self.scopeDev = None
         p = self
@@ -92,15 +86,7 @@ class Camera(DAQGeneric, OptomechDevice):
                 self.scopeDev = p
                 self.scopeDev.sigObjectiveChanged.connect(self.objectiveChanged)
                 break
-        
-        #if 'scopeDevice' in config:
-            #self.scopeDev = self.dm.getDevice(config['scopeDevice'])
-            #self.scopeDev.sigPositionChanged.connect(self.positionChanged)
-            ### Cache microscope state for fast access later
-            #self.objectiveChanged()
-            #self.positionChanged()
-        #else:
-            #self.scopeDev = None
+
         self.transformChanged()
         if self.scopeDev is not None:
             self.objectiveChanged()
@@ -137,7 +123,7 @@ class Camera(DAQGeneric, OptomechDevice):
     
     def setupCamera(self):
         """Prepare the camera at least so that get/setParams will function correctly"""
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
     
     def listParams(self, params=None):
         """Return a dictionary of parameter descriptions. By default, all parameters are listed.
@@ -154,7 +140,7 @@ class Camera(DAQGeneric, OptomechDevice):
         eg:
         {  'paramName': ([list of values], True, False, []) }
         """
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
 
     def setParams(self, params, autoRestart=True, autoCorrect=True):
         """Set camera parameters. Options are:
@@ -167,10 +153,10 @@ class Camera(DAQGeneric, OptomechDevice):
               (note this may differ from requested values if autoCorrect is True)
            1: Boolean value indicating whether a restart is required to enact changes.
               If autoRestart is True, this value indicates whether the camera was restarted."""
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
         
     def getParams(self, params=None):
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
         
     def setParam(self, param, val, autoCorrect=True, autoRestart=True):
         return self.setParams([(param, val)], autoCorrect=autoCorrect, autoRestart=autoRestart)[0]
@@ -186,19 +172,22 @@ class Camera(DAQGeneric, OptomechDevice):
         time is the time of arrival of the frame. Optionally, 'exposeStartTime' and 'exposeDoneTime' 
             may be specified if they are available.
         """
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
         
     def startCamera(self):
         """Calls the camera driver to start the camera's acquisition."""
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
         
     def stopCamera(self):
         """Calls the camera driver to stop the camera's acquisition.
         Note that the acquisition may be _required_ to stop, since other processes
         may be preparing to synchronize with the camera's exposure signal."""
-        raise Exception("Function must be reimplemented in subclass.")
+        raise NotImplementedError("Function must be reimplemented in subclass.")
 
-    
+    def noFrameWarning(self, time):
+        # display a warning message that no camera frames have arrived.
+        # This method is only here to allow PVCam to display some useful information.
+        print "Camera acquisition thread has been waiting %02f sec but no new frames have arrived; shutting down." % diff
     
     def pushState(self, name=None):
         #print "Camera: pushState", name
@@ -237,14 +226,6 @@ class Camera(DAQGeneric, OptomechDevice):
         else:
             if run:
                 self.start()
-            
-        
-        #if not run and self.isRuning():
-            #self.stop()
-        
-        #if run and (restart or (not self.isRunning()):
-            #self.start()
-        
 
     def start(self, block=True):
         """Start camera and acquisition thread"""
@@ -260,6 +241,28 @@ class Camera(DAQGeneric, OptomechDevice):
         #time.sleep(0.1)
         self.acqThread.stop(block=block)
         
+    def acquireFrames(self, n=1):
+        """Immediately acquire and return a specific number of frames.
+
+        This method blocks until all frames are acquired and may not be supported by all camera
+        types.
+        """
+        # TODO: Add a non-blocking mode that returns a Future.
+        frames = self._acquireFrames(n)
+
+        info = dict(self.getParams(['binning', 'exposure', 'region', 'triggerMode']))
+        ss = self.getScopeState()
+        ps = ss['pixelSize']  ## size of CCD pixel
+        info['pixelSize'] = [ps[0] * info['binning'][0], ps[1] * info['binning'][1]]
+        info['objective'] = ss.get('objective', None)
+        info['deviceTransform'] = pg.SRTTransform3D(ss['transform'])
+
+        return Frame(frames, info)
+
+    def _acquireFrames(self, n):
+        # todo: default implementation can use acquisition thread instead..
+        raise NotImplementedError("Camera class %s does not implement this method." % self.__class__.__name__)
+
     def restart(self):
         if self.isRunning():
             self.stop()
@@ -288,8 +291,6 @@ class Camera(DAQGeneric, OptomechDevice):
             if self.camConfig['triggerOutChannel']['device'] != daq:
                 return None
             return self.camConfig['triggerOutChannel']['channel']
-        
-
 
     def taskInterface(self, taskRunner):
         return CameraTaskGui(self, taskRunner)
@@ -301,21 +302,6 @@ class Camera(DAQGeneric, OptomechDevice):
         return CameraInterface(self, mod)
     
     ### Scope interface functions below
-
-    #def getPosition(self, justScope=False):
-        #"""Return the coordinate of the center of the sensor area
-        #If justScope is True, return the scope position, uncorrected for the objective offset"""
-        #with MutexLocker(self.lock):
-            #if justScope:
-                #return self.scopeState['scopePosition']
-            #else:
-                #return self.scopeState['centerPosition']
-
-    #@ftrace
-    #def getScale(self):
-        #"""Return the dimensions of 1 pixel with signs if the image is flipped"""
-        #with MutexLocker(self.lock):
-            #return self.scopeState['scale']
         
     #@ftrace
     def getPixelSize(self):
@@ -359,13 +345,13 @@ class Camera(DAQGeneric, OptomechDevice):
         y = (pos[1] - boundary.top()) * (float(size[1]) / boundary.height())
         return (x, y)
         
-        
     def getScopeState(self):
         """Return meta information to be included with each frame. This function must be FAST."""
         with self.lock:
             return self.scopeState
         
     def transformChanged(self):  ## called then this device's global transform changes.
+        prof = Profiler(disabled=True)
         self.scopeState['transform'] = self.globalTransform()
         o = Vector(self.scopeState['transform'].map(Vector(0,0,0)))
         p = Vector(self.scopeState['transform'].map(Vector(1, 1)) - o)
@@ -381,6 +367,7 @@ class Camera(DAQGeneric, OptomechDevice):
         with self.lock:
             self.scopeState['objective'] = obj.name()
             self.scopeState['id'] += 1
+
     @staticmethod 
     def makeFrameTransform(region, binning):
         """Make a transform that maps from image coordinates to whole-sensor coordinates,
@@ -412,71 +399,21 @@ class Camera(DAQGeneric, OptomechDevice):
         return self.acqThread.wait(*args, **kargs)
 
         
-class Frame(object):
+class Frame(imaging.Frame):
     def __init__(self, data, info):
-        object.__init__(self)
-        self._data = data
-        self._info = info
-        
         ## make frame transform to map from image coordinates to sensor coordinates.
         ## (these may differ due to binning and region of interest settings)
-        tr = Camera.makeFrameTransform(self._info['region'], self._info['binning'])
-        self._frameTransform = tr
-        
-        ## Complete transform maps from image coordinates to global.
-        self._info['transform'] = SRTTransform3D(self.cameraTransform() * tr)
-        
-        
-    def data(self):
-        return self._data
-    
-    def info(self):
-        return self._info
-    
-    def cameraTransform(self):
-        """Returns the transform that maps from camera coordinates to global."""
-        return SRTTransform3D(self._info['cameraTransform'])
-    
-    def frameTransform(self):
-        """Return the transform that maps from this frame's image coordinates
-        to its source camera coordinates. This transform takes into account
-        the camera's region and binning settings.
-        """
-        return SRTTransform3D(self._frameTransform)
-        
-    def globalTransform(self):
-        """
-        Return the transform that maps this frame's image coordinates
-        to global coordinates. This is equivalent to cameraTransform * frameTransform
-        """
-        return SRTTransform3D(self._info['transform'])
-        
-        
-    def mapFromFrameToScope(obj):
-        """
-        Map from the frame's data coordinates to scope coordinates
-        """
-        pass
-    
-    def mapFromFrameToGlobal(obj):
-        """
-        Map from the frame's data coordinates to global coordinates
-        """
-        return self.globalTransform().map(obj)
-    
-    
-    def mapFromFrameToSensor(obj):
-        """
-        Map from the frame's data coordinates to the camera's sensor coordinates
-        """
-        pass
-    
+        tr = Camera.makeFrameTransform(info['region'], info['binning'])
+        info['frameTransform'] = tr
+
+        imaging.Frame.__init__(self, data, info)
     
         
 class CameraTask(DAQGenericTask):
     """Default implementation of camera acquisition task.
-    Some of these functions may need to be reimplemented for subclasses."""
 
+    Some of these methods may need to be reimplemented for subclasses.
+    """
 
     def __init__(self, dev, cmd, parentTask):
         #print "Camera task:", cmd
@@ -758,13 +695,13 @@ class CameraTaskResult:
         return self._frameTimes, self._frameTimesPrecise
         
         
-class AcquireThread(QtCore.QThread):
+class AcquireThread(Thread):
     
     sigNewFrame = QtCore.Signal(object)
     sigShowMessage = QtCore.Signal(object)
     
     def __init__(self, dev):
-        QtCore.QThread.__init__(self)
+        Thread.__init__(self)
         self.dev = dev
         #self.cam = self.dev.getCamera()
         self.camLock = self.dev.camLock
@@ -793,8 +730,7 @@ class AcquireThread(QtCore.QThread):
         self.lock.lock()
         self.stopThread = False
         self.lock.unlock()
-        QtCore.QThread.start(self, *args)
-        
+        Thread.start(self, *args)
     
     def connectCallback(self, method):
         with self.connectMutex:
@@ -854,8 +790,6 @@ class AcquireThread(QtCore.QThread):
                 now = ptime.time()
                 frames = self.dev.newFrames()
                 
-                #with self.camLock:
-                    #frame = self.cam.lastFrame()
                 ## If a new frame is available, process it and inform other threads
                 if len(frames) > 0:
                     if lastFrameId is not None:
@@ -866,33 +800,21 @@ class AcquireThread(QtCore.QThread):
                     ## Build meta-info for this frame(s)
                     info = camState.copy()
                     
-                    ## frameInfo includes pixelSize, objective, centerPosition, scopePosition, imagePosition
                     ss = self.dev.getScopeState()
                     if ss['id'] != scopeState:
-                        #print "scope state changed"
                         scopeState = ss['id']
                         ## regenerate frameInfo here
                         ps = ss['pixelSize']  ## size of CCD pixel
-                        #pos = ss['centerPosition']
-                        #pos2 = [pos[0] - size[0]*ps[0]*0.5 + region[0]*ps[0], pos[1] - size[1]*ps[1]*0.5 + region[1]*ps[1]]
-                        
                         transform = pg.SRTTransform3D(ss['transform'])
-                        #transform.translate(region[0]*ps[0], region[1]*ps[1])  ## correct for ROI here
                         
                         frameInfo = {
                             'pixelSize': [ps[0] * binning[0], ps[1] * binning[1]],  ## size of image pixel
-                            #'scopePosition': ss['scopePosition'],
-                            #'centerPosition': pos,
                             'objective': ss.get('objective', None),
-                            #'imagePosition': pos2
-                            #'cameraTransform': ss['transform'],
-                            'cameraTransform': transform,
+                            'deviceTransform': transform,
                         }
                         
                     ## Copy frame info to info array
                     info.update(frameInfo)
-                    #for k in frameInfo:
-                        #info[k] = frameInfo[k]
                     
                     ## Process all waiting frames. If there is more than one frame waiting, guess the frame times.
                     dt = (now - lastFrameTime) / len(frames)
@@ -903,16 +825,13 @@ class AcquireThread(QtCore.QThread):
                     
                     for frame in frames:
                         frameInfo = info.copy()
-                        data = frame['data']
-                        #print data
-                        del frame['data']
-                        frameInfo.update(frame)
+                        data = frame.pop('data')
+                        frameInfo.update(frame)  # copies 'time' key supplied by camera
                         out = Frame(data, frameInfo)
                         with self.connectMutex:
                             conn = list(self.connections)
                         for c in conn:
                             c(out)
-                        #self.emit(QtCore.SIGNAL("newFrame"), out)
                         self.sigNewFrame.emit(out)
                         
                     lastFrameTime = now
@@ -936,7 +855,7 @@ class AcquireThread(QtCore.QThread):
                     diff = ptime.time()-lastFrameTime
                     if diff > (10 + exposure):
                         if mode == 'Normal':
-                            print "Camera acquisition thread has been waiting %02f sec but no new frames have arrived; shutting down." % diff
+                            self.dev.noFrameWarning(diff)
                             break
                         else:
                             pass  ## do not exit loop if there is a possibility we are waiting for a trigger
@@ -949,18 +868,16 @@ class AcquireThread(QtCore.QThread):
                 self.dev.stopCamera()
             #prof.mark('      camera stop:')
         except:
+            printExc("Error starting camera acquisition:")
             try:
                 with self.camLock:
                     #self.cam.stop()
                     self.dev.stopCamera()
             except:
                 pass
-            printExc("Error starting camera acquisition:")
-            #self.emit(QtCore.SIGNAL("showMessage"), "ERROR starting acquisition (see console output)")
             self.sigShowMessage.emit("ERROR starting acquisition (see console output)")
         finally:
             pass
-            #print "Camera ACQ thread exited."
         
     def stop(self, block=False):
         #print "AcquireThread.stop: Requesting thread stop, acquiring lock first.."

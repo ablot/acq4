@@ -208,7 +208,6 @@ class StimGenerator(QtGui.QWidget):
             else:
                 self.ui.stack.setCurrentIndex(0)
 
-
     def setAdvancedMode(self, adv):
         if self.lockMode or self.advancedMode == adv:
             return
@@ -255,18 +254,17 @@ class StimGenerator(QtGui.QWidget):
         ## Update advanced-mode widgets to reflect (and ultimately enact) changes
         try:
             self.lockMode = True    ## don't let anyone change the mode until we're done
+            block = self.signalsBlocked()
             self.blockSignals(True) ## avoid emitting dataChanged signals twice
             try:
                 self.seqParams.setState(params)
             finally:
-                self.blockSignals(False)
+                self.blockSignals(block)
             self.sigParametersChanged.emit()
             
             self.ui.functionText.setPlainText(funcStr)
         finally:
             self.lockMode = False
-
-    
     
     def test(self):
         try:
@@ -299,6 +297,7 @@ class StimGenerator(QtGui.QWidget):
     def loadState(self, state):
         """set the parameters with the new state"""
         try:
+            block = self.signalsBlocked()
             self.blockSignals(True)  ## avoid emitting multiple signals
             if 'function' in state:
                 #self.ui.advancedBtn.setChecked(True)
@@ -317,7 +316,7 @@ class StimGenerator(QtGui.QWidget):
             if 'advancedMode' in state:
                 self.setAdvancedMode(state['advancedMode'])
         finally:
-            self.blockSignals(False)
+            self.blockSignals(block)
             self.sigDataChanged.emit()
             self.sigStateChanged.emit()
             self.sigParametersChanged.emit()

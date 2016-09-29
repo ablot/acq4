@@ -2,11 +2,11 @@
 from __future__ import with_statement
 from PatchTemplate import *
 from PyQt4 import QtGui, QtCore
-#from PyQt4 import Qwt5 as Qwt
 from acq4.pyqtgraph import WidgetGroup
 from acq4.pyqtgraph import PlotWidget
 from acq4.util.metaarray import *
-from acq4.util.Mutex import Mutex, MutexLocker
+from acq4.util.Mutex import Mutex
+from acq4.util.Thread import Thread
 import traceback, sys, time
 from numpy import *
 import scipy.optimize
@@ -14,7 +14,6 @@ from acq4.util.debug import *
 from acq4.pyqtgraph import siFormat
 import acq4.Manager as Manager
 import acq4.util.ptime as ptime
-#from acq4.LogWindow import LogButton
 from acq4.util.StatusBar import StatusBar
 
 
@@ -22,7 +21,8 @@ class PatchWindow(QtGui.QMainWindow):
     
     sigWindowClosed = QtCore.Signal(object)
     
-    def __init__(self, dm, clampName, modes):
+    def __init__(self, dm, config):
+        clampName = config['clampDev']
         QtGui.QMainWindow.__init__(self)
         self.setWindowTitle(clampName)
         self.startTime = None
@@ -37,8 +37,26 @@ class PatchWindow(QtGui.QMainWindow):
             'fitError': ''
         }
         
-        self.params = modes.pop('default')
-        self.modes = modes
+        self.params = {
+            'mode': 'vc',
+            'rate': config.get('sampleRate', 100000),
+            'downsample': config.get('downsample', 3),
+            'cycleTime': .2,
+            'recordTime': 0.1,
+            'delayTime': 0.03,
+            'pulseTime': 0.05,
+            'icPulse': -30e-12,
+            'vcPulse': -10e-3,
+            'icHolding': 0,
+            'vcHolding': -65e-3,
+            'icHoldingEnabled': False,
+            'icPulseEnabled': True,
+            'vcHoldingEnabled': False,
+            'vcPulseEnabled': True,
+            'drawFit': True,
+            'average': 1,
+        }
+        
         
         self.paramLock = Mutex(QtCore.QMutex.Recursive)
 
@@ -49,31 +67,9 @@ class PatchWindow(QtGui.QMainWindow):
         self.setCentralWidget(self.cw)
         self.ui = Ui_Form()
         self.ui.setupUi(self.cw)
+        #self.logBtn = LogButton("Log")
+        #self.statusBar().addPermanentWidget(self.logBtn)
         self.setStatusBar(StatusBar())
-        
-        # Create one button for each configured mode
-        row = None
-        self.modeRows = []
-        rowLen = 0
-        def mkModeCallback(name):
-            return lambda: self.setMode(name)
-        
-        for modeName, mode in modes.items():
-            if modeName == 'default':
-                continue
-            if row is None:
-                row = QtGui.QWidget()
-                layout = QtGui.QHBoxLayout()
-                row.setLayout(layout)
-                self.ui.modeLayout.addWidget(row)
-                self.modeRows.append(row)
-            btn = QtGui.QPushButton(modeName)
-            layout.addWidget(btn)
-            rowLen += btn.sizeHint().width()
-            if rowLen > 200:
-                row = None
-                rowLen = 0
-            btn.clicked.connect(mkModeCallback(modeName))
 
         self.stateFile = os.path.join('modules', self.clampName + '_ui.cfg')
         uiState = Manager.getManager().readConfigFile(self.stateFile)
@@ -85,7 +81,8 @@ class PatchWindow(QtGui.QMainWindow):
             self.restoreState(ws)
             
         self.ui.splitter_2.setSizes([self.width()/4, self.width()*3./4.])
-
+        self.ui.splitter.setStretchFactor(0, 30)
+        self.ui.splitter.setStretchFactor(1, 10)
 
         self.plots = {}
         for k in self.analysisItems:
@@ -93,6 +90,10 @@ class PatchWindow(QtGui.QMainWindow):
             p.setLabel('left', text=k, units=self.analysisItems[k])
             self.ui.plotLayout.addWidget(p)
             self.plots[k] = p
+        irp = self.plots['inputResistance']
+        irp.setLogMode(y=True, x=False)
+        irp.setYRange(6, 11)
+            
         
         self.ui.icPulseSpin.setOpts(dec=True, step=1, minStep=1e-12, bounds=[None,None], siPrefix=True, suffix='A')
         self.ui.vcPulseSpin.setOpts(dec=True, step=1, minStep=1e-3, bounds=[None,None], siPrefix=True, suffix='V')
@@ -128,6 +129,10 @@ class PatchWindow(QtGui.QMainWindow):
         
         self.ui.startBtn.clicked.connect(self.startClicked)
         self.ui.recordBtn.clicked.connect(self.recordClicked)
+        self.ui.bathModeBtn.clicked.connect(self.bathMode)
+        self.ui.patchModeBtn.clicked.connect(self.patchMode)
+        self.ui.cellModeBtn.clicked.connect(self.cellMode)
+        self.ui.monitorModeBtn.clicked.connect(self.monitorMode)
         self.ui.resetBtn.clicked.connect(self.resetClicked)
         self.thread.finished.connect(self.threadStopped)
         self.thread.sigNewFrame.connect(self.handleNewFrame)
@@ -147,6 +152,7 @@ class PatchWindow(QtGui.QMainWindow):
         self.showPlots()
         self.updateParams()
         self.show()
+        self.bathMode()
     
     def quit(self):
         #print "Stopping patch thread.."
@@ -161,6 +167,36 @@ class PatchWindow(QtGui.QMainWindow):
         self.quit()
         self.sigWindowClosed.emit(self)
     
+    def bathMode(self):
+        self.ui.vcPulseCheck.setChecked(True)
+        self.ui.vcHoldCheck.setChecked(False)
+        self.ui.vcModeRadio.setChecked(True)
+        self.ui.cycleTimeSpin.setValue(0.2)
+        self.ui.pulseTimeSpin.setValue(10e-3)
+        self.ui.delayTimeSpin.setValue(10e-3)
+        self.ui.averageSpin.setValue(1)
+    
+    def patchMode(self):
+        self.ui.vcPulseCheck.setChecked(True)
+        self.ui.vcHoldCheck.setChecked(True)
+        self.ui.vcModeRadio.setChecked(True)
+        self.ui.cycleTimeSpin.setValue(0.2)
+        self.ui.pulseTimeSpin.setValue(10e-3)
+        self.ui.delayTimeSpin.setValue(10e-3)
+        self.ui.averageSpin.setValue(1)
+    
+    def cellMode(self):
+        self.ui.icPulseCheck.setChecked(True)
+        self.ui.icModeRadio.setChecked(True)
+        self.ui.cycleTimeSpin.setValue(250e-3)
+        self.ui.pulseTimeSpin.setValue(150e-3)
+        self.ui.delayTimeSpin.setValue(30e-3)
+        self.ui.averageSpin.setValue(1)
+
+    def monitorMode(self):
+        self.ui.cycleTimeSpin.setValue(40)
+        self.ui.averageSpin.setValue(5)
+        
     def showPlots(self):
         """Show/hide analysis plot widgets"""
         for n in self.analysisItems:
@@ -171,20 +207,6 @@ class PatchWindow(QtGui.QMainWindow):
             else:
                 p.hide()
         self.updateAnalysisPlots()
-
-    def setMode(self, modeName):
-        """Activate a mode as defined in the configuration"""
-        mode = self.modes[modeName].copy()
-        clampMode = mode.pop('mode', None)
-            
-        state = self.stateGroup.state()
-        state.update(mode)
-        self.stateGroup.setState(state)
-        
-        if clampMode == 'ic':
-            self.ui.icModeRadio.setChecked(True)
-        elif clampMode == 'vc':
-            self.ui.vcModeRadio.setChecked(True)
     
     def updateParams(self, *args):
         with self.paramLock:
@@ -368,31 +390,9 @@ class PatchWindow(QtGui.QMainWindow):
         self.ui.startBtn.setText('Start')
         self.ui.startBtn.setEnabled(True)
         self.ui.startBtn.setChecked(False)
-
-    def changeDisplay(self, param, val):
-        if param == 'traceCurveColor':
-            self.patchCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
-        elif param == 'commandCurveColor':
-            self.commandCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
-        elif param == 'fitCurveColor':
-            self.patchFitCurve.setPen(QtGui.QPen(QtGui.QColor(*val)))
-        elif param == 'analysisCurveColor':
-            for curve in self.analysisCurves.values():
-                curve.setPen(QtGui.QPen(QtGui.QColor(*val)))
-        elif param == 'textColor':
-            self.stylesheet['color'] = val
-            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
-            self.cw.setStyleSheet(stl)
-        elif param == 'backgroundColor':
-            self.stylesheet['background-color'] = val
-            stl = ';\n'.join(['%s:rgb%s'%(k,v) for k,v in self.stylesheet.items()])
-            self.cw.setStyleSheet(stl)
-        else:
-            print 'Unknown display param: %s'%param
-            return
         
         
-class PatchThread(QtCore.QThread):
+class PatchThread(Thread):
     
     sigNewFrame = QtCore.Signal(object)
     
@@ -400,7 +400,7 @@ class PatchThread(QtCore.QThread):
         self.ui = ui
         self.manager = ui.manager
         self.clampName = ui.clampName
-        QtCore.QThread.__init__(self)
+        Thread.__init__(self)
         self.lock = Mutex(QtCore.QMutex.Recursive)
         self.stopThread = True
         self.paramsUpdated = True
@@ -412,61 +412,55 @@ class PatchThread(QtCore.QThread):
     def run(self):
         """Main loop for patch thread. This is where protocols are executed and data collected."""
         try:
-            with MutexLocker(self.lock) as l:
+            with self.lock:
                 self.stopThread = False
                 clamp = self.manager.getDevice(self.clampName)
                 daqName = clamp.listChannels().values()[0]['device']  ## Just guess the DAQ by checking one of the clamp's channels
                 clampName = self.clampName
                 self.paramsUpdated = True
-                l.unlock()
-                
-                lastTime = None
-                while True:
-                    ## copy in parameters from GUI
-                    updateCommand = False
-                    l.relock()
+            
+            lastTime = None
+            while True:
+                ## copy in parameters from GUI
+                updateCommand = False
+                with self.lock:
                     if self.paramsUpdated:
                         with self.ui.paramLock:
                             params = self.ui.params.copy()
                             self.paramsUpdated = False
                         updateCommand = True
-                    l.unlock()
-                    
-                    ## run protocol and analysis
-                    try:
-                        self.runOnce(params, l, clamp, daqName, clampName)
-                    except:
-                        printExc("Error running/analyzing patch protocol")
-                    
-                    
-                    
-                    lastTime = ptime.time()-params['recordTime'] ## This is not a proper 'cycle time', but instead enforces a minimum interval between cycles (but this can be very important for performance)
-                    
-                    ## sleep until it is time for the next run
-                    c = 0
-                    stop = False
-                    while True:
-                        ## check for stop button every 100ms
-                        if c % 10 == 0:
-                            l.relock()
+                
+                ## run protocol and analysis
+                try:
+                    self.runOnce(params, clamp, daqName, clampName)
+                except:
+                    printExc("Error running/analyzing patch protocol")
+                
+                lastTime = ptime.time()-params['recordTime'] ## This is not a proper 'cycle time', but instead enforces a minimum interval between cycles (but this can be very important for performance)
+                
+                ## sleep until it is time for the next run
+                c = 0
+                stop = False
+                while True:
+                    ## check for stop button every 100ms
+                    if c % 10 == 0:
+                        with self.lock:
                             if self.stopThread:
-                                l.unlock()
                                 stop = True
                                 break
-                            l.unlock()
-                        now = ptime.time()
-                        if now >= (lastTime+params['cycleTime']):
-                            break
-                        
-                        time.sleep(10e-3) ## Wake up every 10ms
-                        c += 1
-                    if stop:
+                    now = ptime.time()
+                    if now >= (lastTime+params['cycleTime']):
                         break
+                    
+                    time.sleep(10e-3) ## Wake up every 10ms
+                    c += 1
+                if stop:
+                    break
         except:
             printExc("Error in patch acquisition thread, exiting.")
         #self.emit(QtCore.SIGNAL('threadStopped'))
         
-    def runOnce(self, params, l, clamp, daqName, clampName):
+    def runOnce(self, params, clamp, daqName, clampName):
         prof = Profiler('PatchThread.run', disabled=True)
         #lastTime = time.clock()   ## moved to after the command run
         
